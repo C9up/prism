@@ -1,0 +1,32 @@
+[package]
+name = "prism-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Image processing engine in Rust for Prism"
+
+[dependencies]
+# Decode and encode. Pinned to the version already resolved elsewhere in the
+# workspace so one `image` is built, not two.
+#
+# NAMED LIMITATION: this crate's WebP encoder is LOSSLESS only (its own docs
+# say so, and that it does not reach lossless WebP's full potential). Decoding
+# handles both lossy and lossless. Lossy WebP encoding needs libwebp, a C
+# dependency, and a heavier cross-compilation matrix — deliberately out of
+# v0.1. The encode contract does not change if it is added later.
+image = { version = "0.25.10", default-features = false, features = [
+  "jpeg",
+  "png",
+  "webp",
+] }
+# Reading EXIF orientation, so a phone photo is not served rotated, and
+# knowing which tags exist in order to drop them.
+kamadak-exif = "0.6"
+# Rasterising a caller-supplied font for the text watermark. Glyph outlines
+# only — no shaping engine, see `text.rs`.
+ab_glyph = "0.2"
+
+[dev-dependencies]
+# Proving the output carries no EXIF block: the test reads with the same
+# library the engine uses, so a change in either is caught by the other.
+kamadak-exif = "0.6"
