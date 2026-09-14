@@ -41,14 +41,33 @@ pub struct JsLimits {
     pub max_pixels: Option<i64>,
     /// Largest input accepted, in bytes. Default 67108864.
     pub max_bytes: Option<i64>,
+    /// Formats this application will DECODE. Default jpeg, png, webp.
+    ///
+    /// Every decoder is compiled in; this is the runtime gate. Widening it
+    /// exposes more parser surface to whatever an upload form receives, so
+    /// the list is named rather than inherited.
+    pub allowed_formats: Option<Vec<String>>,
 }
 
-fn limits_of(limits: Option<JsLimits>) -> Limits {
+fn limits_of(limits: Option<JsLimits>) -> Result<Limits> {
     let defaults = Limits::default();
     let Some(limits) = limits else {
-        return defaults;
+        return Ok(defaults);
     };
-    Limits {
+    let allowed = match limits.allowed_formats {
+        Some(names) if !names.is_empty() => {
+            guard::FormatSet::from_names(names).map_err(|error| {
+                Error::new(Status::InvalidArg, format!("{}: {}", error.code(), error))
+            })?
+        }
+        // An empty list is a config that would refuse every image. Read as
+        // "unset" rather than honoured, because honouring it means every
+        // upload fails with a message about an allowlist nobody remembers
+        // writing.
+        _ => defaults.allowed,
+    };
+    Ok(Limits {
+        allowed,
         // Negative or zero is not "no limit" — it is a caller who computed a
         // limit wrongly, and reading it as unbounded is how the guard gets
         // switched off by accident. Fall back to the default instead.
@@ -62,7 +81,7 @@ fn limits_of(limits: Option<JsLimits>) -> Limits {
             .filter(|value| *value > 0)
             .map(|value| value as usize)
             .unwrap_or(defaults.max_bytes),
-    }
+    })
 }
 
 #[napi(object)]
@@ -84,6 +103,9 @@ pub struct JsMetadata {
     pub oriented_height: u32,
     pub orientation: u32,
     pub has_alpha: bool,
+    /// The colour space the file DECLARES. `srgb` for the majority, which
+    /// declare nothing — `image` reads no ICC profile.
+    pub color_space: String,
 }
 
 /// One pipeline step.
@@ -110,6 +132,21 @@ pub struct JsOperation {
     pub font: Option<Buffer>,
     pub size: Option<f64>,
     pub color: Option<JsColour>,
+    /// Blur / sharpen radius.
+    pub sigma: Option<f64>,
+    /// Sharpen: contrast step below which nothing is sharpened, so flat areas
+    /// like sky do not have their sensor noise amplified.
+    pub threshold: Option<i32>,
+    /// Brighten (-255..255), contrast (-255..255) and hue rotation (degrees).
+    pub value: Option<f64>,
+    /// `thumbnail`: ignore the aspect ratio, as `fit: "fill"` does.
+    pub exact: Option<bool>,
+    /// A 3x3 convolution kernel, row-major — exactly nine values.
+    pub kernel: Option<Vec<f64>>,
+    /// `convertColorSpace`: the target space.
+    pub to: Option<String>,
+    /// `convertColorSpace`: overrides what the FILE claims about its source.
+    pub from: Option<String>,
 }
 
 #[napi(object)]
@@ -121,6 +158,9 @@ pub struct JsOutput {
     /// What transparency is resolved against for a format with no alpha
     /// channel. Default opaque white.
     pub background: Option<JsColour>,
+    /// Bits per channel: 8 (default) or 16. Only PNG and TIFF carry 16;
+    /// elsewhere the encoder narrows it back rather than refusing.
+    pub depth: Option<u32>,
 }
 
 fn missing(kind: &str, field: &str) -> Error {
@@ -203,6 +243,50 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
                 y: op.y.unwrap_or(0),
             })
         }
+        "thumbnail" => {
+            if op.width.is_none() && op.height.is_none() {
+                return Err(missing("thumbnail", "width or height"));
+            }
+            Ok(Operation::Thumbnail {
+                width: op.width,
+                height: op.height,
+                exact: op.exact.unwrap_or(false),
+            })
+        }
+        "blur" => Ok(Operation::Blur(
+            op.sigma.ok_or_else(|| missing("blur", "sigma"))? as f32,
+        )),
+        "fastBlur" => Ok(Operation::FastBlur(
+            op.sigma.ok_or_else(|| missing("fastBlur", "sigma"))? as f32,
+        )),
+        "sharpen" => Ok(Operation::Sharpen {
+            sigma: op.sigma.ok_or_else(|| missing("sharpen", "sigma"))? as f32,
+            // Zero, not a guess: no threshold means sharpen everything, which
+            // is what an unqualified "sharpen" asks for.
+            threshold: op.threshold.unwrap_or(0),
+        }),
+        "brighten" => Ok(Operation::Brighten(
+            op.value.ok_or_else(|| missing("brighten", "value"))? as i32,
+        )),
+        "contrast" => Ok(Operation::Contrast(
+            op.value.ok_or_else(|| missing("contrast", "value"))? as f32,
+        )),
+        "hueRotate" => Ok(Operation::HueRotate(
+            op.value.ok_or_else(|| missing("hueRotate", "value"))? as i32,
+        )),
+        "convertColorSpace" => Ok(Operation::ConvertColourSpace {
+            to: op.to.ok_or_else(|| missing("convertColorSpace", "to"))?,
+            from: op.from,
+        }),
+        "invert" => Ok(Operation::Invert),
+        "grayscale" => Ok(Operation::Grayscale),
+        "filter3x3" => Ok(Operation::Filter3x3(
+            op.kernel
+                .ok_or_else(|| missing("filter3x3", "kernel"))?
+                .into_iter()
+                .map(|value| value as f32)
+                .collect(),
+        )),
         other => Err(Error::new(
             Status::InvalidArg,
             format!("INVALID_OPERATION: \"{other}\" is not a known operation"),
@@ -219,6 +303,7 @@ fn metadata_of(metadata: Metadata) -> JsMetadata {
         oriented_height: metadata.oriented_height,
         orientation: u32::from(metadata.orientation),
         has_alpha: metadata.has_alpha,
+        color_space: metadata.colour_space,
     }
 }
 
@@ -227,7 +312,7 @@ fn metadata_of(metadata: Metadata) -> JsMetadata {
 #[napi]
 pub fn inspect(bytes: Buffer, limits: Option<JsLimits>) -> Result<JsMetadata> {
     let owned = bytes.to_vec();
-    let limits = limits_of(limits);
+    let limits = limits_of(limits)?;
     guarded("inspecting an image", || {
         prism_engine::inspect(&owned, limits)
     })
@@ -305,8 +390,15 @@ pub fn process(
                     a: 255,
                 })
                 .unwrap_or(Output::WHITE),
+            depth: match output.depth {
+                Some(16) => Output::DEPTH_16,
+                // Anything else is eight. A caller asking for 12 or 32 gets
+                // the web's depth rather than an error, for the same reason
+                // depth is narrowed rather than refused per format.
+                _ => Output::DEPTH_8,
+            },
         },
-        limits: limits_of(limits),
+        limits: limits_of(limits)?,
         auto_orient: auto_orient.unwrap_or(true),
     }))
 }

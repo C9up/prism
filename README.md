@@ -86,6 +86,42 @@ misplace their marks, right-to-left comes out reversed. A watermark is short
 and chosen by the operator, so the trade is deliberate; stamping user-supplied
 text in an arbitrary language needs something else.
 
+### Filters
+
+```ts
+await images.edit(photo)
+  .grayscale()
+  .blur(2)                              // gaussian, accurate and slow
+  .fastBlur(2)                          // box-approximated, far cheaper
+  .sharpen({ sigma: 2, threshold: 5 })  // unsharp mask
+  .brighten(20)                         // -255 to 255
+  .contrast(15)                         // -255 to 255
+  .hueRotate(90)                        // degrees, wraps
+  .invert()
+  .filter3x3([0, -1, 0, -1, 5, -1, 0, -1, 0])
+  .toFormat('png')
+```
+
+`sharpen`'s `threshold` suppresses sharpening below a contrast step — it is
+what stops an unsharp mask amplifying sensor noise in flat areas, a clear sky
+being the usual casualty.
+
+Every numeric knob is bounded, because each arrives from a request: a sigma of
+1000 on a 4000x3000 image is minutes of CPU on a worker thread, so blur radius
+is capped, brightness and contrast are range-checked, and a 3x3 kernel must
+carry exactly nine finite values. Hue is the exception — it is circular, so
+400 degrees means 40 rather than an error.
+
+### Thumbnails
+
+```ts
+await images.edit(photo).thumbnail({ width: 32, height: 32 }).toFormat('webp')
+```
+
+A box filter rather than Lanczos: several times cheaper and visibly softer,
+which is the right trade for a 32px avatar and the wrong one for a 1200px
+hero. `exact: true` ignores the aspect ratio, as `fit: 'fill'` does.
+
 ## Safety
 
 Every byte reaching this package came from an upload, and the guards run
@@ -109,17 +145,97 @@ before anything is allocated:
 
 ## Formats
 
-JPEG, PNG and WebP, read and written.
+Fifteen decoders are compiled in — `jpeg png webp gif bmp ico tiff tga qoi pnm
+dds farbfeld hdr openexr avif` — and fourteen of them encode (`image` ships no
+DDS encoder, so naming it as an output is refused up front).
 
-**WebP is encoded losslessly.** The pure-Rust encoder has no lossy mode, so
-expect a WebP several times the size of one written by libwebp. Lossy encoding
-means a C dependency and a heavier cross-compilation matrix; it was left out of
-0.1.0 deliberately. The encode contract does not change if it is added — only
-the encoder behind it.
+**Which of them an application accepts is a runtime decision, and the default
+is three.** Every decoder is parser surface reachable from whatever an upload
+form receives, so widening is deliberate:
 
-Transparency written to JPEG is composited onto a background (white by
-default), not discarded: dropping the alpha channel keeps whatever colour sat
-underneath, so a transparent red pixel would come out opaque red.
+```ts
+export default defineConfig({
+  limits: { allowedFormats: ['jpeg', 'png', 'webp', 'gif'] },
+})
+```
+
+An unknown name raises rather than being skipped — a typo that silently
+narrowed the list would surface as uploads refused in production for no
+visible reason.
+
+### One that writes but cannot be read back
+
+Prism identifies by CONTENT, never by a filename, and that has a cost: a
+format whose bytes carry no signature at the front cannot be recognised.
+
+**TGA** puts its identifier in a *footer*, so it is not recognised at all. It
+can be written and never accepted as an upload — putting `tga` in
+`allowedFormats` does not make a TGA uploadable.
+
+AVIF used to be in this paragraph. It reads and writes now, which is why this
+package takes a system dependency — see below.
+
+### WebP is lossy by default
+
+A lossless WebP is several times the size of a lossy one, and size is the
+entire reason anyone reaches for the format. `image` ships no lossy encoder, so
+that path goes through libwebp. `quality: 100` selects lossless — the one value
+that cannot mean "compress a bit".
+
+### What building this needs
+
+**A C toolchain**, for libwebp: it is vendored and compiled from source, so it
+costs a compiler and nothing else.
+
+**libdav1d**, as a system library, for AVIF *decoding*. `image`'s pure-Rust
+`avif` feature is an encoder only, and an AVIF that can be written and never
+read is useless for uploads — so `avif-native` is enabled, and it probes
+pkg-config. A machine building this package needs `libdav1d-dev` (Debian),
+`dav1d` (Homebrew) or the vcpkg equivalent.
+
+### The size of the binary
+
+All fifteen formats take the native binary from roughly 2.3 MB to 11 MB, most
+of it the AVIF codec. Multiplied across prebuilt platforms that is the dominant
+cost of the package: an application that only handles jpeg, png and webp is
+paying for twelve codecs it will never allow. Making the set a build feature as
+well as a runtime one would fix that, and has not been done.
+
+## Colour
+
+```ts
+await images.edit(photo).convertColorSpace({ to: 'display-p3' }).toFormat('png')
+```
+
+The samples are *transformed* — primaries and transfer function applied —
+rather than reinterpreted. `inspect()` reports what a file declares as
+`colorSpace`.
+
+Five spaces: `srgb`, `linear-srgb`, `display-p3`, `dci-p3`, `rec709`. The list
+is short because it was proved rather than assumed: `rec2020` and the two HDR
+transfers were implemented, tried against the library, found to raise "not
+supported" for BT.2020 primaries, and removed. A name that can only fail is
+worse than an absent one.
+
+**Two things this cannot do**, both from the model rather than the code:
+
+- **`image` reads no ICC profile.** A JPEG carrying an Adobe RGB profile is
+  decoded as sRGB, because the profile is never seen. Pass `from` when you know
+  better — it overrides the file's claim rather than converting:
+  `convertColorSpace({ to: 'srgb', from: 'display-p3' })`.
+- **Adobe RGB has no CICP code point at all**, so it cannot be named here by
+  anyone. Work that needs it needs an ICC pipeline, which is a different
+  dependency.
+
+## Bit depth
+
+```ts
+await images.edit(scan).toBuffer({ format: 'png', depth: 16 })
+```
+
+Only PNG and TIFF carry sixteen bits. Elsewhere the encoder narrows back to
+eight rather than refusing — a pipeline that sets `depth` once should not break
+when its output format is switched.
 
 ## Errors
 

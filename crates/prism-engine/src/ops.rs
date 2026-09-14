@@ -169,3 +169,126 @@ pub fn composite(base: DynamicImage, top: &DynamicImage, x: i64, y: i64) -> Dyna
     overlay(&mut canvas, &top.to_rgba8(), x, y);
     DynamicImage::ImageRgba8(canvas)
 }
+
+// ─── Filters ────────────────────────────────────────────────────────
+//
+// Every one of these is a thin forward to `image`'s own implementation. The
+// value added here is the VALIDATION: each takes a number that came from an
+// HTTP request, and an unbounded sigma is a denial of service rather than a
+// blurry picture — the cost of a Gaussian blur grows with its radius, on a
+// buffer whose size the caller also chose.
+
+/// Largest blur radius accepted.
+///
+/// A sigma of 1000 on a 4000x3000 image is minutes of CPU on a worker
+/// thread. The cap is generous for anything anyone actually wants — a
+/// portrait blur is single digits — and bounds the worst case.
+const MAX_SIGMA: f32 = 100.0;
+
+fn finite(name: &str, value: f32) -> Result<f32, EngineError> {
+    if !value.is_finite() {
+        return Err(EngineError::Geometry(format!(
+            "{name} must be a finite number"
+        )));
+    }
+    Ok(value)
+}
+
+fn sigma(value: f32) -> Result<f32, EngineError> {
+    let value = finite("sigma", value)?;
+    if !(0.0..=MAX_SIGMA).contains(&value) {
+        return Err(EngineError::Geometry(format!(
+            "sigma must be between 0 and {MAX_SIGMA}, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Gaussian blur. Accurate and slow; see [`fast_blur`] for the cheap one.
+pub fn blur(image: DynamicImage, amount: f32) -> Result<DynamicImage, EngineError> {
+    Ok(image.blur(sigma(amount)?))
+}
+
+/// Box-approximated blur — visually close to Gaussian, far cheaper.
+pub fn fast_blur(image: DynamicImage, amount: f32) -> Result<DynamicImage, EngineError> {
+    Ok(image.fast_blur(sigma(amount)?))
+}
+
+/// Unsharp mask. `threshold` suppresses sharpening below a contrast step,
+/// which is what stops it amplifying sensor noise in flat areas like sky.
+pub fn sharpen(
+    image: DynamicImage,
+    amount: f32,
+    threshold: i32,
+) -> Result<DynamicImage, EngineError> {
+    Ok(image.unsharpen(sigma(amount)?, threshold))
+}
+
+/// Additive brightness, -255 to 255.
+pub fn brighten(image: DynamicImage, value: i32) -> Result<DynamicImage, EngineError> {
+    if !(-255..=255).contains(&value) {
+        return Err(EngineError::Geometry(format!(
+            "brightness must be between -255 and 255, got {value}"
+        )));
+    }
+    Ok(image.brighten(value))
+}
+
+/// Contrast. Negative flattens, positive steepens; 0 is unchanged.
+pub fn contrast(image: DynamicImage, amount: f32) -> Result<DynamicImage, EngineError> {
+    let amount = finite("contrast", amount)?;
+    if !(-255.0..=255.0).contains(&amount) {
+        return Err(EngineError::Geometry(format!(
+            "contrast must be between -255 and 255, got {amount}"
+        )));
+    }
+    Ok(image.adjust_contrast(amount))
+}
+
+/// Rotate the hue, in degrees. Wraps, so any integer is valid.
+pub fn hue_rotate(image: DynamicImage, degrees: i32) -> DynamicImage {
+    image.huerotate(degrees)
+}
+
+/// Invert in place, then hand the image back.
+pub fn invert(mut image: DynamicImage) -> DynamicImage {
+    image.invert();
+    image
+}
+
+pub fn grayscale(image: DynamicImage) -> DynamicImage {
+    image.grayscale()
+}
+
+/// Fast downscale with a box filter.
+///
+/// Not a substitute for [`resize`]: it is several times cheaper and visibly
+/// softer, which is the right trade for a 32px avatar and the wrong one for a
+/// 1200px hero. `exact` ignores the aspect ratio, as `Fit::Fill` does.
+pub fn thumbnail(
+    image: DynamicImage,
+    width: Option<u32>,
+    height: Option<u32>,
+    exact: bool,
+) -> Result<DynamicImage, EngineError> {
+    let (tw, th) = target(&image, width, height)?;
+    Ok(if exact {
+        image.thumbnail_exact(tw, th)
+    } else {
+        image.thumbnail(tw, th)
+    })
+}
+
+/// A 3x3 convolution — emboss, edge detection, custom sharpening.
+pub fn filter3x3(image: DynamicImage, kernel: &[f32]) -> Result<DynamicImage, EngineError> {
+    if kernel.len() != 9 {
+        return Err(EngineError::Geometry(format!(
+            "a 3x3 kernel needs exactly 9 values, got {}",
+            kernel.len()
+        )));
+    }
+    for value in kernel {
+        finite("kernel value", *value)?;
+    }
+    Ok(image.filter3x3(kernel))
+}

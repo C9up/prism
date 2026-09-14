@@ -8,8 +8,37 @@
  * `native.ts`, in one place, rather than leaking into the API.
  */
 
-/** The formats the engine will read and write. */
-export type ImageFormat = "jpeg" | "png" | "webp";
+/**
+ * Every format this build can DECODE.
+ *
+ * All of these decoders are compiled in; which of them an application will
+ * accept is a runtime decision — see {@link Limits.allowedFormats}. The
+ * default is the three the web runs on.
+ */
+export type ReadableFormat =
+	| "jpeg"
+	| "png"
+	| "webp"
+	| "gif"
+	| "bmp"
+	| "ico"
+	| "tiff"
+	| "tga"
+	| "qoi"
+	| "pnm"
+	| "dds"
+	| "farbfeld"
+	| "hdr"
+	| "openexr"
+	| "avif";
+
+/**
+ * The formats the engine can WRITE.
+ *
+ * `dds` is readable but not writable — `image` ships no encoder for it — so
+ * naming it as an output is refused up front.
+ */
+export type ImageFormat = Exclude<ReadableFormat, "dds">;
 
 /** How a resize reconciles the requested box with the aspect ratio. */
 export type Fit =
@@ -70,13 +99,80 @@ export interface WatermarkTextOptions {
 	y?: number;
 }
 
+export interface ThumbnailOptions {
+	width?: number;
+	height?: number;
+	/** Ignore the aspect ratio, as `fit: "fill"` does. Default `false`. */
+	exact?: boolean;
+}
+
+export interface SharpenOptions {
+	/** Radius. 0-100. */
+	sigma: number;
+	/**
+	 * Contrast step below which nothing is sharpened. Default 0.
+	 *
+	 * Raising it is what stops an unsharp mask amplifying sensor noise in
+	 * flat areas — a clear sky is the usual casualty.
+	 */
+	threshold?: number;
+}
+
+/**
+ * The colour spaces this engine can convert between.
+ *
+ * A curated list, and a short one on purpose. `image` models colour with
+ * CICP, not ICC, and refuses any conversion whose colorimetry it cannot
+ * interpret — BT.2020 and the HDR transfers among them. Each name here was
+ * tried against the library and kept only because it works; a name that can
+ * only raise is worse than an absent one.
+ *
+ * **Adobe RGB is not here and cannot be.** CICP has no code point for it.
+ */
+export type ColorSpace =
+	| "srgb"
+	| "linear-srgb"
+	| "display-p3"
+	| "dci-p3"
+	| "rec709";
+
+export interface ConvertColorSpaceOptions {
+	to: ColorSpace;
+	/**
+	 * Overrides what the FILE claims about its own space.
+	 *
+	 * For the common case of an image whose real profile the decoder never
+	 * read — `image` has no ICC reader, so a JPEG carrying an Adobe RGB
+	 * profile is decoded as sRGB. Getting this wrong produces a wrong picture
+	 * rather than an error, which is why it is opt-in.
+	 */
+	from?: ColorSpace;
+}
+
 export type Operation =
 	| ({ kind: "resize" } & ResizeOptions)
 	| ({ kind: "crop" } & CropOptions)
 	| { kind: "rotate"; degrees: number }
 	| { kind: "flip"; axis: "horizontal" | "vertical" }
 	| ({ kind: "composite" } & CompositeOptions)
-	| ({ kind: "watermarkText" } & WatermarkTextOptions);
+	| ({ kind: "watermarkText" } & WatermarkTextOptions)
+	| ({ kind: "thumbnail" } & ThumbnailOptions)
+	/** Gaussian blur. Accurate and slow — `fastBlur` is the cheap one. */
+	| { kind: "blur"; sigma: number }
+	/** Box-approximated blur: visually close to Gaussian, far cheaper. */
+	| { kind: "fastBlur"; sigma: number }
+	| ({ kind: "sharpen" } & SharpenOptions)
+	/** Additive brightness, -255 to 255. */
+	| { kind: "brighten"; value: number }
+	/** Contrast, -255 to 255. Negative flattens, positive steepens. */
+	| { kind: "contrast"; value: number }
+	/** Hue rotation in degrees. Wraps, so any integer is valid. */
+	| { kind: "hueRotate"; value: number }
+	| { kind: "invert" }
+	| { kind: "grayscale" }
+	/** A 3x3 convolution, row-major — emboss, edge detection, custom sharpening. */
+	| { kind: "filter3x3"; kernel: readonly number[] }
+	| ({ kind: "convertColorSpace" } & ConvertColorSpaceOptions);
 
 /** Ceilings applied before anything is decoded. */
 export interface Limits {
@@ -89,6 +185,19 @@ export interface Limits {
 	maxPixels?: number;
 	/** Largest input accepted, in bytes. Default 67108864 (64 MiB). */
 	maxBytes?: number;
+	/**
+	 * Formats this application will decode. Default `["jpeg", "png", "webp"]`.
+	 *
+	 * Every decoder is compiled in, so this is a runtime gate rather than a
+	 * build one — and widening it is a decision, not a convenience. Each
+	 * format added is another parser reachable from whatever an upload form
+	 * receives, which is why the default is the three a browser renders.
+	 *
+	 * An unknown name raises rather than being skipped: a typo that silently
+	 * narrowed the list would surface as uploads refused in production for no
+	 * visible reason.
+	 */
+	allowedFormats?: readonly ReadableFormat[];
 }
 
 export interface OutputOptions {
@@ -104,6 +213,14 @@ export interface OutputOptions {
 	 * written as opaque red.
 	 */
 	background?: Colour;
+	/**
+	 * Bits per channel: 8 (default) or 16.
+	 *
+	 * Only PNG and TIFF carry 16. Elsewhere the encoder narrows it back
+	 * rather than refusing — a pipeline that sets depth once should not break
+	 * when its output format is switched.
+	 */
+	depth?: 8 | 16;
 }
 
 /** What an image is, read from its header. */
@@ -123,6 +240,11 @@ export interface Metadata {
 	/** EXIF orientation, 1-8. `1` when there is none. */
 	orientation: number;
 	hasAlpha: boolean;
+	/**
+	 * The colour space the file DECLARES — `srgb` for the majority, which
+	 * declare nothing.
+	 */
+	colorSpace: string;
 }
 
 export interface PrismConfig {

@@ -8,6 +8,7 @@
 //! three steps is deliberate and load-bearing: identify the format from the
 //! content, bound the dimensions from the header, and only then allocate.
 
+pub mod colour;
 pub mod encode;
 pub mod error;
 pub mod exif;
@@ -38,6 +39,10 @@ pub struct Metadata {
     /// `1` when there is no EXIF orientation.
     pub orientation: u8,
     pub has_alpha: bool,
+    /// The colour space the file DECLARES — `unknown` when it is not one this
+    /// engine names, and `srgb` for the majority of files, which declare
+    /// nothing and are decoded as sRGB by default.
+    pub colour_space: String,
 }
 
 /// One step of a pipeline.
@@ -71,6 +76,33 @@ pub enum Operation {
         x: i64,
         y: i64,
     },
+    /// Fast box downscale. Cheaper and softer than `Resize`.
+    Thumbnail {
+        width: Option<u32>,
+        height: Option<u32>,
+        exact: bool,
+    },
+    Blur(f32),
+    /// Box-approximated blur — visually close, far cheaper.
+    FastBlur(f32),
+    Sharpen {
+        sigma: f32,
+        threshold: i32,
+    },
+    Brighten(i32),
+    Contrast(f32),
+    HueRotate(i32),
+    Invert,
+    Grayscale,
+    /// A 3x3 convolution kernel, row-major.
+    Filter3x3(Vec<f32>),
+    /// Convert into a colour space, optionally declaring the source first.
+    ConvertColourSpace {
+        to: String,
+        /// Overrides what the FILE claims. For an image whose real profile
+        /// the decoder never read — `image` has no ICC reader.
+        from: Option<String>,
+    },
 }
 
 /// What to write out.
@@ -80,9 +112,20 @@ pub struct Output {
     pub quality: u8,
     /// What transparency is resolved against when the format has no alpha.
     pub background: Colour,
+    /// Bits per channel to write: 8 or 16.
+    ///
+    /// 16 is only honoured by formats that carry it — PNG and TIFF. Elsewhere
+    /// the encoder narrows it back, which is why this is a request rather
+    /// than a guarantee.
+    pub depth: u8,
 }
 
 impl Output {
+    /// Eight bits per channel: what the web runs on.
+    pub const DEPTH_8: u8 = 8;
+    /// Sixteen bits per channel, for the formats that carry it.
+    pub const DEPTH_16: u8 = 16;
+
     /// White, opaque — what a page shows behind an image.
     pub const WHITE: Colour = Colour {
         r: 255,
@@ -118,6 +161,7 @@ pub fn inspect(bytes: &[u8], limits: Limits) -> Result<Metadata, EngineError> {
             exif::Orientation::Rotate270 => 8,
         },
         has_alpha: probe.format != ImageFormat::Jpeg,
+        colour_space: colour::DEFAULT_SPACE_NAME.to_string(),
     })
 }
 
@@ -216,6 +260,25 @@ pub fn process(
                 let layer = text::render(font, text, *size, *colour)?;
                 ops::composite(image, &layer, *x, *y)
             }
+            Operation::Thumbnail {
+                width,
+                height,
+                exact,
+            } => ops::thumbnail(image, *width, *height, *exact)?,
+            Operation::Blur(sigma) => ops::blur(image, *sigma)?,
+            Operation::FastBlur(sigma) => ops::fast_blur(image, *sigma)?,
+            Operation::Sharpen { sigma, threshold } => ops::sharpen(image, *sigma, *threshold)?,
+            Operation::Brighten(value) => ops::brighten(image, *value)?,
+            Operation::Contrast(amount) => ops::contrast(image, *amount)?,
+            Operation::HueRotate(degrees) => ops::hue_rotate(image, *degrees),
+            Operation::Invert => ops::invert(image),
+            Operation::Grayscale => ops::grayscale(image),
+            Operation::Filter3x3(kernel) => ops::filter3x3(image, kernel)?,
+            Operation::ConvertColourSpace { to, from } => {
+                let target = colour::parse_space(to)?;
+                let source = from.as_deref().map(colour::parse_space).transpose()?;
+                colour::convert(image, target, source)?
+            }
         };
     }
 
@@ -226,5 +289,5 @@ pub fn process(
     if !encode::keeps_alpha(output.format) {
         image = flatten(image, output.background);
     }
-    encode::encode(&image, output.format, output.quality)
+    encode::encode(&image, output.format, output.quality, output.depth)
 }

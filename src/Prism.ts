@@ -10,6 +10,7 @@
 import { inspectNative, processNative } from "./native.js";
 import type {
 	CompositeOptions,
+	ConvertColorSpaceOptions,
 	CropOptions,
 	ImageFormat,
 	Limits,
@@ -18,6 +19,8 @@ import type {
 	OutputOptions,
 	PrismConfig,
 	ResizeOptions,
+	SharpenOptions,
+	ThumbnailOptions,
 	WatermarkTextOptions,
 } from "./types.js";
 
@@ -64,6 +67,82 @@ export class Pipeline {
 
 	watermarkText(options: WatermarkTextOptions): this {
 		this.#operations.push({ kind: "watermarkText", ...options });
+		return this;
+	}
+
+	/**
+	 * Fast box downscale.
+	 *
+	 * Not a substitute for {@link resize}: several times cheaper and visibly
+	 * softer, which is the right trade for a 32px avatar and the wrong one for
+	 * a 1200px hero.
+	 */
+	thumbnail(options: ThumbnailOptions): this {
+		this.#operations.push({ kind: "thumbnail", ...options });
+		return this;
+	}
+
+	/** Gaussian blur. Accurate and slow — {@link fastBlur} is the cheap one. */
+	blur(sigma: number): this {
+		this.#operations.push({ kind: "blur", sigma });
+		return this;
+	}
+
+	/** Box-approximated blur: visually close to Gaussian, far cheaper. */
+	fastBlur(sigma: number): this {
+		this.#operations.push({ kind: "fastBlur", sigma });
+		return this;
+	}
+
+	/** Unsharp mask. */
+	sharpen(options: SharpenOptions): this {
+		this.#operations.push({ kind: "sharpen", ...options });
+		return this;
+	}
+
+	/** Additive brightness, -255 to 255. */
+	brighten(value: number): this {
+		this.#operations.push({ kind: "brighten", value });
+		return this;
+	}
+
+	/** Contrast, -255 to 255. Negative flattens, positive steepens. */
+	contrast(value: number): this {
+		this.#operations.push({ kind: "contrast", value });
+		return this;
+	}
+
+	/** Rotate the hue, in degrees. Wraps, so any integer is valid. */
+	hueRotate(value: number): this {
+		this.#operations.push({ kind: "hueRotate", value });
+		return this;
+	}
+
+	invert(): this {
+		this.#operations.push({ kind: "invert" });
+		return this;
+	}
+
+	grayscale(): this {
+		this.#operations.push({ kind: "grayscale" });
+		return this;
+	}
+
+	/** A 3x3 convolution, row-major — exactly nine values. */
+	filter3x3(kernel: readonly number[]): this {
+		this.#operations.push({ kind: "filter3x3", kernel });
+		return this;
+	}
+
+	/**
+	 * Convert into a colour space, transforming the samples rather than
+	 * reinterpreting them.
+	 *
+	 * Pass `from` when the file's own claim is wrong — which is most images
+	 * with a real profile, because `image` reads no ICC.
+	 */
+	convertColorSpace(options: ConvertColorSpaceOptions): this {
+		this.#operations.push({ kind: "convertColorSpace", ...options });
 		return this;
 	}
 

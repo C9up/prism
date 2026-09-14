@@ -9,6 +9,14 @@ export interface JsLimits {
 	maxPixels?: number;
 	/** Largest input accepted, in bytes. Default 67108864. */
 	maxBytes?: number;
+	/**
+	 * Formats this application will DECODE. Default jpeg, png, webp.
+	 *
+	 * Every decoder is compiled in; this is the runtime gate. Widening it
+	 * exposes more parser surface to whatever an upload form receives, so
+	 * the list is named rather than inherited.
+	 */
+	allowedFormats?: Array<string>;
 }
 
 export interface JsColour {
@@ -28,6 +36,11 @@ export interface JsMetadata {
 	orientedHeight: number;
 	orientation: number;
 	hasAlpha: boolean;
+	/**
+	 * The colour space the file DECLARES. `srgb` for the majority, which
+	 * declare nothing — `image` reads no ICC profile.
+	 */
+	colorSpace: string;
 }
 
 /**
@@ -56,6 +69,23 @@ export interface JsOperation {
 	font?: Buffer;
 	size?: number;
 	color?: JsColour;
+	/** Blur / sharpen radius. */
+	sigma?: number;
+	/**
+	 * Sharpen: contrast step below which nothing is sharpened, so flat areas
+	 * like sky do not have their sensor noise amplified.
+	 */
+	threshold?: number;
+	/** Brighten (-255..255), contrast (-255..255) and hue rotation (degrees). */
+	value?: number;
+	/** `thumbnail`: ignore the aspect ratio, as `fit: "fill"` does. */
+	exact?: boolean;
+	/** A 3x3 convolution kernel, row-major — exactly nine values. */
+	kernel?: Array<number>;
+	/** `convertColorSpace`: the target space. */
+	to?: string;
+	/** `convertColorSpace`: overrides what the FILE claims about its source. */
+	from?: string;
 }
 
 export interface JsOutput {
@@ -68,6 +98,11 @@ export interface JsOutput {
 	 * channel. Default opaque white.
 	 */
 	background?: JsColour;
+	/**
+	 * Bits per channel: 8 (default) or 16. Only PNG and TIFF carry 16;
+	 * elsewhere the encoder narrows it back rather than refusing.
+	 */
+	depth?: number;
 }
 
 /**

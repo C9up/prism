@@ -9,18 +9,37 @@ description = "Image processing engine in Rust for Prism"
 # Decode and encode. Pinned to the version already resolved elsewhere in the
 # workspace so one `image` is built, not two.
 #
-# NAMED LIMITATION: this crate's WebP encoder is LOSSLESS only (its own docs
-# say so, and that it does not reach lossless WebP's full potential). Decoding
-# handles both lossy and lossless. Lossy WebP encoding needs libwebp, a C
-# dependency, and a heavier cross-compilation matrix — deliberately out of
-# v0.1. The encode contract does not change if it is added later.
+# Decoding, and encoding for every format but lossy WebP — `image`'s own WebP
+# encoder is lossless-only, so that one goes through libwebp below.
+#
+# `avif-native` is the AVIF DECODER, and it is the one place this crate needs a
+# system library: it pulls `dav1d-sys`, which probes pkg-config for libdav1d.
+# `avif` alone is the encoder (ravif, pure Rust), which is not enough — an AVIF
+# that can be written and not read is useless on the web.
 image = { version = "0.25.10", default-features = false, features = [
   "jpeg",
   "png",
   "webp",
+  "gif",
+  "bmp",
+  "ico",
+  "tiff",
+  "tga",
+  "qoi",
+  "pnm",
+  "dds",
+  "ff",
+  "hdr",
+  "exr",
+  "avif",
+  "avif-native",
 ] }
 # Reading EXIF orientation, so a phone photo is not served rotated, and
 # knowing which tags exist in order to drop them.
+# Lossy WebP. `image`'s own encoder is lossless-only, and lossless WebP is
+# several times the size — which defeats the reason anyone reaches for WebP.
+webp = "0.3"
+
 kamadak-exif = "0.6"
 # Rasterising a caller-supplied font for the text watermark. Glyph outlines
 # only — no shaping engine, see `text.rs`.
@@ -29,4 +48,8 @@ ab_glyph = "0.2"
 [dev-dependencies]
 # Proving the output carries no EXIF block: the test reads with the same
 # library the engine uses, so a change in either is caught by the other.
+# Lossy WebP. `image`'s own encoder is lossless-only, and lossless WebP is
+# several times the size — which defeats the reason anyone reaches for WebP.
+webp = "0.3"
+
 kamadak-exif = "0.6"

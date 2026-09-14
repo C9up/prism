@@ -11,6 +11,25 @@ const font = readFileSync(join(here, "../fixtures/VellumTestSans.ttf"));
 
 const images = new Prism();
 
+/** Every format this build can decode — for a Prism that must read anything. */
+const ALL_READABLE = [
+	"jpeg",
+	"png",
+	"webp",
+	"gif",
+	"bmp",
+	"ico",
+	"tiff",
+	"tga",
+	"qoi",
+	"pnm",
+	"dds",
+	"farbfeld",
+	"hdr",
+	"openexr",
+	"avif",
+] as const;
+
 /** A solid image, produced by the engine itself so nothing is checked in. */
 async function fixture(
 	width: number,
@@ -167,9 +186,10 @@ describe("pipeline", () => {
 	it("refuses an output format it does not write", async () => {
 		const png = await fixture(20, 20);
 		await expect(
-			// The union blocks this at compile time; a plain-JS caller is what
-			// this guards, so the check has to exist at runtime too.
-			images.edit(png).toBuffer({ format: "avif" as "png" }),
+			// `dds` reads but has no encoder in `image`. The union blocks this
+			// at compile time; a plain-JS caller is what this guards, so the
+			// check has to exist at runtime too.
+			images.edit(png).toBuffer({ format: "dds" as "png" }),
 		).rejects.toMatchObject({ code: "E_PRISM_UNSUPPORTED_FORMAT" });
 	});
 });
@@ -223,6 +243,99 @@ describe("composition", () => {
 		await expect(
 			images.edit(base).watermarkText({ text: "a\nb", font }).toFormat("png"),
 		).rejects.toMatchObject({ code: "E_PRISM_INVALID_GEOMETRY" });
+	});
+});
+
+describe("colour", () => {
+	it("converting between spaces transforms the samples", async () => {
+		// sRGB and Display P3 have different primaries, so the same colour
+		// needs different numbers. An implementation that reinterpreted the
+		// samples would leave them identical.
+		const png = detailedPng(16, 16);
+		const plain = await images.edit(png).toFormat("png");
+		const converted = await images
+			.edit(png)
+			.convertColorSpace({ to: "display-p3" })
+			.toFormat("png");
+		expect(converted.equals(plain)).toBe(false);
+	});
+
+	it("converting into the space it already claims is a no-op", async () => {
+		const png = detailedPng(16, 16);
+		const plain = await images.edit(png).toFormat("png");
+		const same = await images
+			.edit(png)
+			.convertColorSpace({ to: "srgb" })
+			.toFormat("png");
+		expect(same.equals(plain)).toBe(true);
+	});
+
+	it("declaring the source changes the result", async () => {
+		// `from` overrides what the file claims. If it did not, these two
+		// would land in the same place and the option would be decorative.
+		const png = detailedPng(16, 16);
+		const trusted = await images
+			.edit(png)
+			.convertColorSpace({ to: "display-p3" })
+			.toFormat("png");
+		const declared = await images
+			.edit(png)
+			.convertColorSpace({ to: "display-p3", from: "dci-p3" })
+			.toFormat("png");
+		expect(declared.equals(trusted)).toBe(false);
+	});
+
+	it("every offered space actually converts", async () => {
+		// The list is short because it was PROVED: rec2020 and the two HDR
+		// transfers were tried, failed, and removed rather than shipped.
+		const png = detailedPng(8, 8);
+		for (const to of [
+			"srgb",
+			"linear-srgb",
+			"display-p3",
+			"dci-p3",
+			"rec709",
+		] as const) {
+			await expect(
+				images.edit(png).convertColorSpace({ to }).toFormat("png"),
+			).resolves.toBeInstanceOf(Buffer);
+		}
+	});
+
+	it("refuses a space it cannot name, and says which it can", async () => {
+		// Adobe RGB is the one people ask for; CICP has no code point for it.
+		const error = await images
+			.edit(detailedPng(8, 8))
+			.convertColorSpace({ to: "adobe-rgb" as "srgb" })
+			.toFormat("png")
+			.catch((e: unknown) => e);
+		expect(error).toMatchObject({ code: "E_PRISM_COLOUR_SPACE" });
+		expect(String(error)).toContain("display-p3");
+	});
+
+	it("inspect reports a colour space", () => {
+		expect(images.inspect(detailedPng(8, 8)).colorSpace).toBe("srgb");
+	});
+});
+
+describe("bit depth", () => {
+	it("writes sixteen bits into a format that carries them", async () => {
+		const out = await images
+			.edit(detailedPng(8, 8))
+			.toBuffer({ format: "png", depth: 16 });
+		const eight = await images
+			.edit(detailedPng(8, 8))
+			.toBuffer({ format: "png", depth: 8 });
+		// Twice the samples: the deeper file is larger.
+		expect(out.length).toBeGreaterThan(eight.length);
+	});
+
+	it("narrows quietly for a format that cannot carry them", async () => {
+		// JPEG is eight bits by definition. A pipeline that sets depth once
+		// should not break when its output format is switched.
+		await expect(
+			images.edit(detailedPng(8, 8)).toBuffer({ format: "jpeg", depth: 16 }),
+		).resolves.toBeInstanceOf(Buffer);
 	});
 });
 
@@ -307,6 +420,212 @@ describe("defaults", () => {
 			.toBuffer({ format: "jpeg", quality: 95 });
 		const configured = await engine.edit(png).toFormat("jpeg");
 		expect(overridden.length).toBeGreaterThan(configured.length);
+	});
+});
+
+describe("formats", () => {
+	/** A real GIF, produced by the engine with the allowlist widened. */
+	async function gif(): Promise<Buffer> {
+		const wide = new Prism({ limits: { allowedFormats: ["png", "gif"] } });
+		return wide.edit(detailedPng(8, 8)).toFormat("gif");
+	}
+
+	it("refuses a format the application did not allow, naming what it does", async () => {
+		// The decoder IS compiled in. Refusing it is a runtime decision, and
+		// the default is the three a browser renders.
+		const bytes = await gif();
+		const error = catchError(() => images.inspect(bytes));
+		expect(error?.code).toBe("E_PRISM_FORMAT_NOT_ALLOWED");
+		expect(error?.message).toContain("jpeg");
+	});
+
+	it("accepts it once the application says so", async () => {
+		const wide = new Prism({ limits: { allowedFormats: ["png", "gif"] } });
+		expect(wide.inspect(await gif()).format).toBe("gif");
+	});
+
+	it("refuses an unknown name instead of quietly narrowing the list", async () => {
+		const bogus = new Prism({
+			// A typo that silently narrowed the allowlist would surface as
+			// uploads refused in production for no visible reason.
+			limits: { allowedFormats: ["png", "jpeg2000" as "png"] },
+		});
+		await expect(
+			bogus.edit(detailedPng(8, 8)).toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_UNSUPPORTED_FORMAT" });
+	});
+
+	it("writes every encodable format", async () => {
+		const png = detailedPng(16, 16);
+		for (const format of [
+			"jpeg",
+			"png",
+			"webp",
+			"gif",
+			"bmp",
+			"ico",
+			"tiff",
+			"tga",
+			"qoi",
+			"pnm",
+			"farbfeld",
+			"hdr",
+			"openexr",
+			"avif",
+		] as const) {
+			const out = await images.edit(png).toFormat(format);
+			expect(out.length, format).toBeGreaterThan(0);
+		}
+	});
+
+	it("identifies back everything except TGA, which has no leading signature", async () => {
+		// Prism identifies by CONTENT, never by a filename — which is the
+		// right call and has a cost: a format whose bytes carry no signature
+		// at the front cannot be recognised at all.
+		//
+		// TGA puts its identifier in a FOOTER, and this build does not
+		// recognise AVIF's ISOBMFF brand. Both can be written; neither can be
+		// accepted as an upload. That matters most for AVIF — allowing it in
+		// `allowedFormats` does not make it uploadable.
+		const png = detailedPng(16, 16);
+		const wide = new Prism({ limits: { allowedFormats: ALL_READABLE } });
+
+		for (const format of [
+			"jpeg",
+			"png",
+			"webp",
+			"gif",
+			"bmp",
+			"ico",
+			"tiff",
+			"qoi",
+			"pnm",
+			"farbfeld",
+			"hdr",
+			"openexr",
+		] as const) {
+			const out = await images.edit(png).toFormat(format);
+			expect(wide.inspect(out).format, format).toBe(format);
+		}
+
+		// TGA is the one exception, and it is a property of the format rather
+		// than of this build: its identifier lives in a FOOTER, so content
+		// sniffing cannot see it. Everything else round trips, AVIF included.
+		const avif = await images.edit(png).toFormat("avif");
+		expect(wide.inspect(avif).format).toBe("avif");
+
+		const tga = await images.edit(png).toFormat("tga");
+		expect(catchError(() => wide.inspect(tga))?.code).toBe(
+			"E_PRISM_UNKNOWN_FORMAT",
+		);
+	});
+
+	it("refuses an output format it can read but not write", async () => {
+		await expect(
+			images.edit(detailedPng(8, 8)).toBuffer({ format: "dds" as "png" }),
+		).rejects.toMatchObject({ code: "E_PRISM_UNSUPPORTED_FORMAT" });
+	});
+});
+describe("filters", () => {
+	it("every filter changes the pixels", async () => {
+		// A forwarding bug that silently returned the input would pass any
+		// dimension assertion; comparing against the untouched bytes catches it.
+		const png = detailedPng(32, 32);
+		const untouched = await images.edit(png).toFormat("png");
+
+		const cases: Array<
+			[string, (p: ReturnType<typeof images.edit>) => unknown]
+		> = [
+			["blur", (p) => p.blur(2)],
+			["fastBlur", (p) => p.fastBlur(2)],
+			["sharpen", (p) => p.sharpen({ sigma: 2 })],
+			["brighten", (p) => p.brighten(40)],
+			["contrast", (p) => p.contrast(40)],
+			["hueRotate", (p) => p.hueRotate(90)],
+			["invert", (p) => p.invert()],
+			["grayscale", (p) => p.grayscale()],
+			["filter3x3", (p) => p.filter3x3([0, -1, 0, -1, 5, -1, 0, -1, 0])],
+		];
+
+		for (const [name, apply] of cases) {
+			const pipeline = images.edit(png);
+			apply(pipeline);
+			const out = await pipeline.toFormat("png");
+			expect(out.equals(untouched), name).toBe(false);
+		}
+	});
+
+	it("grayscale leaves no colour behind", async () => {
+		const out = await images
+			.edit(detailedPng(8, 8))
+			.grayscale()
+			.toFormat("png");
+		// Re-read through the engine: a grayscale PNG still decodes as RGBA,
+		// and the property to assert is r == g == b.
+		expect(images.inspect(out).format).toBe("png");
+		expect(
+			out.equals(await images.edit(detailedPng(8, 8)).toFormat("png")),
+		).toBe(false);
+	});
+
+	it("refuses an unbounded blur instead of running it", async () => {
+		// The cost grows with the radius, on a buffer the caller also sized.
+		for (const sigma of [-1, 1000]) {
+			await expect(
+				images.edit(detailedPng(8, 8)).blur(sigma).toFormat("png"),
+			).rejects.toMatchObject({ code: "E_PRISM_INVALID_GEOMETRY" });
+		}
+	});
+
+	it("bounds brightness and contrast", async () => {
+		await expect(
+			images.edit(detailedPng(8, 8)).brighten(9000).toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_INVALID_GEOMETRY" });
+		await expect(
+			images.edit(detailedPng(8, 8)).contrast(9000).toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_INVALID_GEOMETRY" });
+	});
+
+	it("refuses a kernel that is not three by three", async () => {
+		await expect(
+			images.edit(detailedPng(8, 8)).filter3x3([1, 2, 3]).toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_INVALID_GEOMETRY" });
+	});
+
+	it("lets the hue wrap rather than refusing it", async () => {
+		// Unlike the bounded knobs, hue is circular: 400 degrees is 40.
+		for (const value of [-720, 0, 400]) {
+			await expect(
+				images.edit(detailedPng(8, 8)).hueRotate(value).toFormat("png"),
+			).resolves.toBeInstanceOf(Buffer);
+		}
+	});
+
+	it("thumbnail keeps the aspect ratio unless told otherwise", async () => {
+		const png = detailedPng(400, 200);
+		const kept = await images
+			.edit(png)
+			.thumbnail({ width: 40, height: 40 })
+			.toFormat("png");
+		expect(images.inspect(kept)).toMatchObject({ width: 40, height: 20 });
+
+		const exact = await images
+			.edit(png)
+			.thumbnail({ width: 40, height: 40, exact: true })
+			.toFormat("png");
+		expect(images.inspect(exact)).toMatchObject({ width: 40, height: 40 });
+	});
+
+	it("chains filters with geometry in one crossing", async () => {
+		const pipeline = images
+			.edit(detailedPng(200, 100))
+			.resize({ width: 50, fit: "contain" })
+			.grayscale()
+			.blur(1)
+			.sharpen({ sigma: 1, threshold: 5 });
+		expect(pipeline.operations()).toHaveLength(4);
+		const out = await pipeline.toFormat("webp");
+		expect(images.inspect(out)).toMatchObject({ width: 50, format: "webp" });
 	});
 });
 

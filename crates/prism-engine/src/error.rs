@@ -21,6 +21,11 @@ pub enum EngineError {
     ZeroDimension,
     UnknownFormat,
     UnsupportedFormat(String),
+    /// A real image, in a format this application chose not to decode.
+    FormatNotAllowed {
+        found: String,
+        allowed: String,
+    },
     Unreadable(String),
     Decode(String),
     Encode(String),
@@ -28,6 +33,8 @@ pub enum EngineError {
     /// target size of zero.
     Geometry(String),
     Font(String),
+    /// A colour space that cannot be named, or a conversion the model refuses.
+    ColourSpace(String),
 }
 
 impl EngineError {
@@ -40,11 +47,13 @@ impl EngineError {
             Self::ZeroDimension => "ZERO_DIMENSION",
             Self::UnknownFormat => "UNKNOWN_FORMAT",
             Self::UnsupportedFormat(_) => "UNSUPPORTED_FORMAT",
+            Self::FormatNotAllowed { .. } => "FORMAT_NOT_ALLOWED",
             Self::Unreadable(_) => "UNREADABLE",
             Self::Decode(_) => "DECODE_FAILED",
             Self::Encode(_) => "ENCODE_FAILED",
             Self::Geometry(_) => "INVALID_GEOMETRY",
             Self::Font(_) => "INVALID_FONT",
+            Self::ColourSpace(_) => "COLOUR_SPACE",
         }
     }
 }
@@ -63,13 +72,18 @@ impl fmt::Display for EngineError {
             Self::ZeroDimension => write!(f, "the image declares a zero width or height"),
             Self::UnknownFormat => write!(f, "the bytes do not identify as any known image format"),
             Self::UnsupportedFormat(name) => {
-                write!(f, "\"{name}\" is not one of jpeg, png, webp")
+                write!(f, "\"{name}\" is not a format this engine writes")
             }
+            Self::FormatNotAllowed { found, allowed } => write!(
+                f,
+                "the image is a {found}, which this application does not accept. Allowed: {allowed}"
+            ),
             Self::Unreadable(why) => write!(f, "the input could not be read: {why}"),
             Self::Decode(why) => write!(f, "decoding failed: {why}"),
             Self::Encode(why) => write!(f, "encoding failed: {why}"),
             Self::Geometry(why) => write!(f, "{why}"),
             Self::Font(why) => write!(f, "the font could not be read: {why}"),
+            Self::ColourSpace(why) => write!(f, "{why}"),
         }
     }
 }

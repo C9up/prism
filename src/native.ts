@@ -51,7 +51,13 @@ function engine(): NativePrism {
 
 function limitsOf(limits: Limits | undefined): JsLimits | undefined {
 	if (!limits) return undefined;
-	return { maxPixels: limits.maxPixels, maxBytes: limits.maxBytes };
+	return {
+		maxPixels: limits.maxPixels,
+		maxBytes: limits.maxBytes,
+		allowedFormats: limits.allowedFormats
+			? [...limits.allowedFormats]
+			: undefined,
+	};
 }
 
 /**
@@ -100,6 +106,41 @@ function flatten(operation: Operation): JsOperation {
 				x: operation.x,
 				y: operation.y,
 			};
+		case "thumbnail":
+			return {
+				kind: "thumbnail",
+				width: operation.width,
+				height: operation.height,
+				exact: operation.exact,
+			};
+		case "blur":
+			return { kind: "blur", sigma: operation.sigma };
+		case "fastBlur":
+			return { kind: "fastBlur", sigma: operation.sigma };
+		case "sharpen":
+			return {
+				kind: "sharpen",
+				sigma: operation.sigma,
+				threshold: operation.threshold,
+			};
+		case "brighten":
+			return { kind: "brighten", value: operation.value };
+		case "contrast":
+			return { kind: "contrast", value: operation.value };
+		case "hueRotate":
+			return { kind: "hueRotate", value: operation.value };
+		case "invert":
+			return { kind: "invert" };
+		case "grayscale":
+			return { kind: "grayscale" };
+		case "filter3x3":
+			return { kind: "filter3x3", kernel: [...operation.kernel] };
+		case "convertColorSpace":
+			return {
+				kind: "convertColorSpace",
+				to: operation.to,
+				from: operation.from,
+			};
 	}
 }
 
@@ -132,6 +173,7 @@ export async function processNative(
 		format: output.format,
 		quality: output.quality,
 		background: output.background,
+		depth: output.depth,
 	};
 	try {
 		return await loaded.process(

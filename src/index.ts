@@ -22,8 +22,10 @@ export {
 export { isNativeAvailable } from "./native.js";
 export { defineConfig, Pipeline, Prism } from "./Prism.js";
 export type {
+	ColorSpace,
 	Colour,
 	CompositeOptions,
+	ConvertColorSpaceOptions,
 	CropOptions,
 	Fit,
 	ImageFormat,
@@ -32,6 +34,9 @@ export type {
 	Operation,
 	OutputOptions,
 	PrismConfig,
+	ReadableFormat,
 	ResizeOptions,
+	SharpenOptions,
+	ThumbnailOptions,
 	WatermarkTextOptions,
 } from "./types.js";
