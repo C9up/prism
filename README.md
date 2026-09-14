@@ -182,16 +182,32 @@ entire reason anyone reaches for the format. `image` ships no lossy encoder, so
 that path goes through libwebp. `quality: 100` selects lossless — the one value
 that cannot mean "compress a bit".
 
-### What building this needs
+### What installing this needs: nothing
 
-**A C toolchain**, for libwebp: it is vendored and compiled from source, so it
-costs a compiler and nothing else.
+The published binaries carry their own codecs. libwebp is vendored, and
+libdav1d — the AVIF *decoder*, without which an AVIF could be written and never
+read — is compiled from source and linked statically by the release workflow.
+`ldd` on a published binary lists libc, libm and libgcc, and that is all.
 
-**libdav1d**, as a system library, for AVIF *decoding*. `image`'s pure-Rust
-`avif` feature is an encoder only, and an AVIF that can be written and never
-read is useless for uploads — so `avif-native` is enabled, and it probes
-pkg-config. A machine building this package needs `libdav1d-dev` (Debian),
-`dav1d` (Homebrew) or the vcpkg equivalent.
+### What building it from source needs
+
+Only relevant when no prebuilt binary matches the platform, or when working on
+the crate itself. libwebp still costs nothing but a C compiler. libdav1d is the
+one that asks for something, and there are two ways to give it:
+
+- **a system libdav1d** — `libdav1d-dev` on Debian, `dav1d` on Homebrew, the
+  vcpkg package on Windows. `dav1d-sys` finds it through pkg-config. The
+  resulting binary then *needs* that library at runtime, which is fine for a
+  local build and is why it is not how releases are made.
+- **`SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=auto`**, with `meson`, `ninja` and (on
+  x86) `nasm` on PATH. `dav1d-sys` clones dav1d and builds it statically. This
+  is what CI does.
+
+One trap worth knowing if a build goes strange: `dav1d-sys` runs meson through
+a call that checks the process could be *started*, not that it succeeded. With
+`nasm` missing, meson fails, nothing is reported, and the link quietly falls
+back to whatever else is on the system. Check that all three tools resolve
+before blaming the crate.
 
 ### The size of the binary
 

@@ -12,3 +12,4 @@ coverage/
 *.log
 .turbo/
 .generated-config-*
+test-results.json

@@ -1,0 +1,425 @@
+name: prism-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm_overwrite:
+        description: 'Type YES to override the drift gate (force-publish even if registry version >= package.json version). Use only for rollback scenarios.'
+        required: false
+        default: 'no'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Why this workflow is not a copy of vellum's
+#
+# prism's engine has two C dependencies, and they behave differently:
+#
+# * **libwebp** is VENDORED by `libwebp-sys` (it depends on `cc` and compiles
+#   the C from source). It costs a C toolchain and nothing else, on every
+#   platform. Nothing below is about libwebp.
+#
+# * **libdav1d** — the AVIF decoder, without which an AVIF can be written and
+#   never read — is NOT vendored. `dav1d-sys` uses `system-deps`, which probes
+#   pkg-config. Left alone, the linker resolves a SHARED system libdav1d, and
+#   the artefact then carries a dependency the user's machine has to satisfy:
+#
+#       $ ldd index.linux-x64-gnu.node
+#       libdav1d.so.7 => /lib64/libdav1d.so.7
+#
+#   A prebuilt binary that needs a system library is not a prebuilt binary.
+#   The whole point of this matrix is that someone who cannot compile Rust can
+#   still install the package.
+#
+#   `dav1d-sys` has a second path: `SYSTEM_DEPS_DAV1D_BUILD_INTERNAL` makes it
+#   clone dav1d 1.5.0 and build it with meson as a STATIC library. Measured,
+#   both ways, on linux-x64:
+#
+#       system lib   → ldd lists libdav1d.so.7
+#       internal     → ldd lists libgcc, libm, libc. Nothing else.
+#
+#   So every leg below sets it, and a gate after the build refuses an artefact
+#   that mentions dav1d or webp in its dynamic dependencies.
+#
+#   **`always`, not `auto`.** `auto` builds internally only when pkg-config
+#   finds nothing — and a runner image that happens to ship libdav1d would then
+#   silently produce the un-shippable artefact. The failure mode is invisible
+#   until a user installs it.
+#
+#   One more reason to be explicit: `dav1d-sys`'s build script runs meson and
+#   ninja through `.output().expect(...)`, which checks that the process could
+#   be SPAWNED and not that it succeeded. With nasm missing, meson fails, the
+#   build script reports nothing, and cargo goes on to link whatever else it
+#   can find. That is exactly how a green build ships a broken binary, and it
+#   is why the tooling is installed explicitly per platform below.
+#
+# The second consequence: **nothing is cross-compiled any more.** meson builds
+# for the machine it runs on, not for `CARGO_BUILD_TARGET`, so vellum's trick of
+# producing darwin-x64 on an arm64 runner would link an arm64 libdav1d into an
+# x86_64 binary. darwin-x64 is built on an Intel runner instead. Every leg is
+# native, and every leg therefore runs the tests.
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # The cross-platform matrix produces the prebuilt binaries a release ships.
+  # Running it on every push costs five runners to rebuild what nobody
+  # downloads, so it is gated on the package version actually moving.
+  # Typecheck, lint and the test jobs are NOT gated.
+  version-gate:
+    name: Version bumped?
+    runs-on: ubuntu-latest
+    outputs:
+      bumped: ${{ steps.check.outputs.bumped }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - id: check
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != 'push' ]; then
+            echo 'bumped=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ github.event_name }} — the matrix runs unconditionally"
+            exit 0
+          fi
+          git show 'HEAD^:package.json' > "$RUNNER_TEMP/previous.json" 2>/dev/null \
+            || echo '{}' > "$RUNNER_TEMP/previous.json"
+          previous=$(node -p "require('$RUNNER_TEMP/previous.json').version ?? ''")
+          current=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          if [ "$previous" = "$current" ]; then
+            echo 'bumped=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::version unchanged ($current) — skipping the cross-platform matrix"
+          else
+            echo 'bumped=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::version $previous -> $current — building the cross-platform matrix"
+          fi
+
+  quality:
+    name: Typecheck & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm exec tsc -p tsconfig.build.json --noEmit
+      # `tsconfig.build.json` leaves the tests out, so every type a test relies
+      # on goes ungated until the project's own tsconfig runs over them.
+      - run: pnpm typecheck
+      - run: pnpm lint
+
+  build-and-test:
+    name: Build & test (${{ matrix.suffix }})
+    needs: version-gate
+    if: needs.version-gate.outputs.bumped == 'true'
+    runs-on: ${{ matrix.os }}
+    env:
+      # See the block at the top of this file. `always` and not `auto`.
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: always
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `nasm` is dav1d's x86 assembler; its meson build hard-requires it on
+          # x86/x86_64 and does not ask for it on aarch64.
+          - { os: ubuntu-latest,    suffix: linux-x64-gnu,   target: x86_64-unknown-linux-gnu,  nasm: true }
+          - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, nasm: false }
+          - { os: macos-13,         suffix: darwin-x64,      target: x86_64-apple-darwin,       nasm: true }
+          - { os: macos-14,         suffix: darwin-arm64,    target: aarch64-apple-darwin,      nasm: false }
+          - { os: windows-latest,   suffix: win32-x64-msvc,  target: x86_64-pc-windows-msvc,    nasm: true }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # ── dav1d's build tooling, per platform ──────────────────────────────
+      - name: Build tooling (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build ${{ matrix.nasm && 'nasm' || '' }}
+
+      - name: Build tooling (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja ${{ matrix.nasm && 'nasm' || '' }}
+
+      - name: Build tooling (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade meson ninja
+          choco install nasm --no-progress -y
+          # choco drops nasm outside PATH for the current job.
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: The tooling is really there
+        shell: bash
+        run: |
+          # Checked rather than assumed, because dav1d-sys's build script does
+          # not check: it spawns meson and ninja and ignores their exit codes,
+          # so a missing one produces a silently wrong artefact, not an error.
+          meson --version
+          ninja --version
+          if [ "${{ matrix.nasm }}" = "true" ]; then nasm -v; fi
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - run: cargo fmt --check
+      # clippy as an error rather than a note: this crate decodes files it did
+      # not write, and the lints that catch a panic on hostile input are worth
+      # more here than the ones that catch a style.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build NAPI binary
+        run: pnpm build:napi
+
+      - name: The artefact must carry its own dav1d
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # The gate this whole file exists for. A dynamic reference here means
+          # the published binary would fail to load on any machine without a
+          # matching libdav1d — which is every machine that installed a prebuilt
+          # binary precisely so it would not need one.
+          artefact="index.${{ matrix.suffix }}.node"
+          if [ "$(uname)" = "Darwin" ]; then
+            deps=$(otool -L "$artefact")
+          else
+            deps=$(ldd "$artefact")
+          fi
+          echo "$deps"
+          if printf '%s' "$deps" | grep -qiE 'dav1d|webp'; then
+            echo "::error::$artefact links a system dav1d or webp. SYSTEM_DEPS_DAV1D_BUILD_INTERNAL did not take effect — check that meson, ninja and nasm were all found above."
+            exit 1
+          fi
+
+      - name: Vitest (JSON reporter)
+        run: pnpm exec vitest run --reporter=default --reporter=json --outputFile=test-results.json
+        shell: bash
+
+      - name: Smoke gate — tests ran, none skipped, AVIF round-tripped
+        shell: bash
+        run: node scripts/ci-smoke-gate.mjs
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v7
+        with:
+          name: prism-napi-${{ matrix.suffix }}
+          path: index.${{ matrix.suffix }}.node
+          if-no-files-found: error
+
+  cargo-tests:
+    name: Cargo tests (linux-x64-gnu)
+    runs-on: ubuntu-latest
+    env:
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: always
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build nasm
+      - run: cargo test --workspace --all-features
+
+  # vitest on the host platform, on every push. The matrix above runs the same
+  # suite across five targets, but only when the version moves — so without
+  # this job the TypeScript signal would disappear from an ordinary push along
+  # with it.
+  ts-tests:
+    name: TypeScript (vitest, linux-x64-gnu)
+    runs-on: ubuntu-latest
+    env:
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: always
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build nasm
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build:napi
+      # With coverage: the thresholds in vitest.config.ts are only a gate if
+      # something runs them.
+      - run: pnpm exec vitest run --coverage
+
+  # Publish job — gated on workflow_dispatch (manual maintainer trigger).
+  # Requires NPM_TOKEN + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching
+  # package.json. The drift gate refuses to overwrite a published version (or
+  # roll back to an older one) without `confirm_overwrite=YES`.
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    needs: [quality, build-and-test, cargo-tests, ts-tests]
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Verify NPM_TOKEN secret
+        run: |
+          if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
+            echo "::error::NPM_TOKEN secret missing — set it in repo settings before a manual publish"
+            exit 1
+          fi
+
+      - name: Tag-vs-package.json gate
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then
+            echo "::error::HEAD has no v<MAJOR>.<MINOR>.<PATCH>-shaped tag — refuse to publish from an untagged commit"
+            exit 1
+          fi
+          node_err=$(mktemp)
+          if ! pkg_v=$(node -p "require('./package.json').version" 2>"$node_err"); then
+            echo "::error::Failed to read package.json version: $(cat "$node_err")"
+            rm -f "$node_err"; exit 1
+          fi
+          rm -f "$node_err"
+          if [ -z "$pkg_v" ]; then
+            echo "::error::package.json version field is empty"
+            exit 1
+          fi
+          pkg_tag="v${pkg_v}"
+          if [ "$tag" != "$pkg_tag" ]; then
+            echo "::error::Tag $tag does not match package.json $pkg_tag — refuse to publish from a drifted tag"
+            exit 1
+          fi
+          echo "Tag gate passed: $tag == $pkg_tag"
+
+      - name: Drift fail-closed gate
+        env:
+          CONFIRM_OVERWRITE: ${{ inputs.confirm_overwrite }}
+        run: |
+          node_err=$(mktemp)
+          if ! local_v=$(node -p "require('./package.json').version" 2>"$node_err"); then
+            echo "::error::Failed to read package.json version: $(cat "$node_err")"
+            rm -f "$node_err"; exit 1
+          fi
+          rm -f "$node_err"
+          if [ -z "$local_v" ]; then
+            echo "::error::package.json version field is empty"
+            exit 1
+          fi
+          npm_err=$(mktemp)
+          # `if` form so `set -e` does not abort the step when `npm view` exits
+          # non-zero (E404 on a first publish).
+          if npm_v=$(npm view --fetch-timeout=30000 @c9up/prism version 2>"$npm_err"); then
+            status=0
+          else
+            status=$?
+          fi
+          err=$(cat "$npm_err"); rm -f "$npm_err"
+          if [ "$status" -ne 0 ]; then
+            if echo "$err" | grep -qE 'E404|404 Not Found'; then
+              npm_v=""
+              echo "Drift gate: package not yet on registry — first-publish path"
+            else
+              echo "::error::Cannot reach npm registry — refuse to publish without a verified registry version. Output: $err"
+              exit 1
+            fi
+          fi
+          if [ -z "$npm_v" ]; then
+            echo "Drift gate passed: first publish of @c9up/prism (local $local_v)"
+            exit 0
+          fi
+          highest=$(printf '%s\n%s\n' "$npm_v" "$local_v" | sort -V | tail -1)
+          if [ "$local_v" = "$npm_v" ]; then
+            if [ "$CONFIRM_OVERWRITE" != "YES" ]; then
+              echo "::error::Local version $local_v already published — bump package.json or re-run with confirm_overwrite=YES (rollback path)"
+              exit 1
+            fi
+            echo "Override accepted: republishing $local_v over registry $npm_v"
+          elif [ "$highest" = "$npm_v" ]; then
+            if [ "$CONFIRM_OVERWRITE" != "YES" ]; then
+              echo "::error::Registry version $npm_v is newer than local $local_v — refuse to roll back without confirm_overwrite=YES"
+              exit 1
+            fi
+            echo "Override accepted: rolling back from $npm_v to $local_v"
+          else
+            echo "Drift gate passed: local $local_v > registry $npm_v"
+          fi
+
+      - run: pnpm install --no-frozen-lockfile
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: prism-napi-*
+          merge-multiple: true
+
+      - name: Five binaries, or nothing goes out
+        run: |
+          # A publish missing a platform is worse than no publish: it installs
+          # cleanly and then fails to load, on the machines least able to
+          # diagnose it.
+          missing=0
+          for suffix in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            if [ ! -f "index.${suffix}.node" ]; then
+              echo "::error::index.${suffix}.node was not produced by the matrix"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          ls -la ./*.node
+
+      - run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::notice::not built from a tag - no release to create"
+            exit 0
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::notice::release $tag already exists - leaving it alone"
+            exit 0
+          fi
+          prev="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          range="${tag}"
+          [ -n "$prev" ] && range="${prev}..${tag}"
+          notes="$(git log "$range" --no-merges --format='### %s%n%n%b%n' \
+            | grep -vE '^### [a-z0-9@/.-]+ [0-9]+\.[0-9]+\.[0-9]+$' || true)"
+          [ -z "${notes// }" ] && notes="_Version bump only - no behavioural change._"
+          [ -n "$prev" ] && notes="${notes}"$'\n\n---\n\n'"Changes since \`${prev}\`."
+          printf '%s\n' "$notes" | gh release create "$tag" --title "$tag" --notes-file -
