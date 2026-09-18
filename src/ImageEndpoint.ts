@@ -52,11 +52,20 @@ function isEncodable(value: string): value is ImageFormat {
 /**
  * The widths served when configuration names none.
  *
- * The same ladder `@c9up/nebula` generates from, so the default component and
- * the default endpoint agree without either being configured. Changing one
- * without the other is what makes every second image a 400.
+ * The same list `@c9up/nebula` draws from — its `IMAGE_SIZES` for elements
+ * that are not the width of a screen, then its device ladder. That is the
+ * contract between the two halves, and it is the one thing here that cannot
+ * be changed on one side alone: a component emitting a width this list does
+ * not contain produces a `srcset` where every entry is a 400, and the page
+ * quietly falls back to its single `src`.
+ *
+ * `tests/unit/image-endpoint.test.ts` locks the literal, and nebula's
+ * `tests/unit/image.test.ts` locks the same one.
  */
 export const DEFAULT_WIDTHS: readonly number[] = [
+	// Elements that are not the width of a screen: avatars, icons, thumbnails.
+	16, 32, 48, 64, 96, 128, 256, 384,
+	// Device widths.
 	640, 750, 828, 960, 1080, 1280, 1668, 1920, 2048, 2560, 3200, 3840, 4480,
 	5120, 6016,
 ];

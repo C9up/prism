@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	DEFAULT_WIDTHS,
 	type ImageHttpContext,
 	registerImageRoute,
 } from "../../src/ImageEndpoint.js";
@@ -116,6 +117,32 @@ afterEach(async () => {
 		const dir = temporary.pop();
 		if (dir !== undefined) await rm(dir, { recursive: true, force: true });
 	}
+});
+
+describe("the contract with the component", () => {
+	it("serves exactly the widths @c9up/nebula generates", () => {
+		// Locked as a literal on BOTH sides rather than shared through a
+		// dependency, because prism must not depend on a component library and
+		// nebula must not depend on a native module. A width on one list and
+		// not the other is a srcset entry that 400s — silent, because the page
+		// still renders from its single src.
+		expect([...DEFAULT_WIDTHS]).toEqual([
+			16, 32, 48, 64, 96, 128, 256, 384, 640, 750, 828, 960, 1080, 1280, 1668,
+			1920, 2048, 2560, 3200, 3840, 4480, 5120, 6016,
+		]);
+	});
+
+	it("serves a width a constrained 1200px image would ask for", async () => {
+		// The case that made this list what it is: 1200 and 2400 are not rungs,
+		// so the component rounds up to 1280 and 2560 — and those must be here.
+		const { dir } = await root();
+		const request = mount({ roots: [dir] });
+		for (const w of ["1280", "2560"]) {
+			expect((await request({ src: "photo.png", w, f: "webp" })).status).toBe(
+				200,
+			);
+		}
+	});
 });
 
 describe("what the endpoint refuses", () => {
