@@ -23,6 +23,9 @@ function app(config: Record<string, unknown>): PrismAppContext & {
 			singleton(token, factory) {
 				bindings.set(token, factory);
 			},
+			has(token: unknown): boolean {
+				return bindings.has(token);
+			},
 			async resolve(token: unknown): Promise<unknown> {
 				if (!resolved.has(token)) {
 					const factory = bindings.get(token);
@@ -148,5 +151,71 @@ describe("configure", () => {
 		expect(config).toContain("defineConfig({");
 		expect(config).toContain("maxPixels");
 		expect(config).toContain("autoOrient");
+	});
+});
+
+describe("PrismProvider and the image endpoint", () => {
+	/** A host that also carries a router, as Ream's container does. */
+	function withRouter(config: Record<string, unknown>): {
+		host: PrismAppContext;
+		paths: string[];
+	} {
+		const host = app(config);
+		const paths: string[] = [];
+		host.bindings.set("router", () => ({
+			get(path: string) {
+				paths.push(path);
+				return undefined;
+			},
+		}));
+		return { host, paths };
+	}
+
+	it("mounts nothing when the config does not ask for it", async () => {
+		clearPrism();
+		const { host, paths } = withRouter({ images: defineConfig({}) });
+		const provider = new PrismProvider(host);
+		provider.register();
+		await provider.boot();
+		expect(paths).toEqual([]);
+		await provider.shutdown();
+	});
+
+	it("mounts the endpoint where the config puts it", async () => {
+		clearPrism();
+		const { host, paths } = withRouter({
+			images: defineConfig({
+				serve: { roots: ["/srv/public"], path: "/__image" },
+			}),
+		});
+		const provider = new PrismProvider(host);
+		provider.register();
+		await provider.boot();
+		expect(paths).toEqual(["/__image"]);
+		await provider.shutdown();
+	});
+
+	it("refuses to boot with an endpoint that could serve nothing", async () => {
+		// A `serve` block with no roots is a configuration mistake that would
+		// otherwise surface as every image 404ing in production.
+		clearPrism();
+		const { host } = withRouter({
+			images: defineConfig({ serve: { roots: [] } }),
+		});
+		const provider = new PrismProvider(host);
+		provider.register();
+		await expect(provider.boot()).rejects.toThrow(/no roots/);
+	});
+
+	it("leaves the endpoint unmounted outside Ream", async () => {
+		// No `router` in the container: the host wires `registerImageRoute`
+		// itself rather than the provider guessing at an HTTP layer.
+		clearPrism();
+		const provider = new PrismProvider(
+			app({ images: defineConfig({ serve: { roots: ["/srv/public"] } }) }),
+		);
+		provider.register();
+		await expect(provider.boot()).resolves.toBeUndefined();
+		await provider.shutdown();
 	});
 });

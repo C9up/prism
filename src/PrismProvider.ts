@@ -10,12 +10,14 @@
  */
 
 import "./augmentations.js";
+import { type ImageRouter, registerImageRoute } from "./ImageEndpoint.js";
 import { Prism } from "./Prism.js";
 import { clearPrism, getPrism, setPrism } from "./services/main.js";
 import type { PrismConfig } from "./types.js";
 
 interface PrismContainer {
 	singleton(token: unknown, factory: () => unknown): void;
+	has(token: unknown): boolean;
 	/**
 	 * `unknown`, not a generic `resolve<T>`: a signature promising a type
 	 * nothing verified cannot be implemented without an unchecked cast, so the
@@ -29,6 +31,14 @@ interface PrismConfigStore {
 export interface PrismAppContext {
 	container: PrismContainer;
 	config: PrismConfigStore;
+}
+
+function isRouter(value: unknown): value is ImageRouter {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof Reflect.get(value, "get") === "function"
+	);
 }
 
 function isPrismConfig(value: unknown): value is PrismConfig {
@@ -84,6 +94,37 @@ export default class PrismProvider {
 	async boot(): Promise<void> {
 		this.#images = await this.#resolvePrism();
 		setPrism(this.#images);
+		await this.#mountEndpoint(this.#images);
+	}
+
+	/**
+	 * Mount the transformation endpoint, if the application asked for one.
+	 *
+	 * Two conditions, and both are refusals to guess. No `serve` block means
+	 * the application never asked for a public route that reads files and
+	 * burns CPU — installing prism must not add one. No `router` in the
+	 * container means the host is not Ream, and the user wires the handler
+	 * themselves with `registerImageRoute`.
+	 *
+	 * The router is resolved rather than imported, which is what keeps this
+	 * package usable outside Ream.
+	 */
+	async #mountEndpoint(images: Prism): Promise<void> {
+		const serve = images.config().serve;
+		if (serve === undefined) return;
+		if (serve.roots.length === 0) {
+			throw new Error(
+				"[prism] images.serve declares no roots, so the endpoint would serve nothing. Name the directories images may be read from.",
+			);
+		}
+		if (!this.app.container.has("router")) return;
+		const router = await this.app.container.resolve("router");
+		if (!isRouter(router)) {
+			throw new Error(
+				"[prism] the container returned something that is not a router for the router token.",
+			);
+		}
+		registerImageRoute(router, images, serve);
 	}
 
 	async shutdown(): Promise<void> {

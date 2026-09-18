@@ -247,11 +247,55 @@ export interface Metadata {
 	colorSpace: string;
 }
 
+export interface ImageServingConfig {
+	/** Route path. Defaults to `/__image`. */
+	path?: string;
+	/**
+	 * Absolute directories a `src` may resolve inside.
+	 *
+	 * The entire access-control story. An empty list serves nothing, which is
+	 * the safe thing for a misconfiguration to do.
+	 */
+	roots: readonly string[];
+	/** Widths that may be requested. Defaults to {@link DEFAULT_WIDTHS}. */
+	widths?: readonly number[];
+	/** Formats that may be requested. Defaults to AVIF, WebP, JPEG and PNG. */
+	formats?: readonly ImageFormat[];
+	/**
+	 * Qualities that may be requested. Defaults to the one below.
+	 *
+	 * A list rather than a range because quality multiplies the cache the same
+	 * way width does, and almost every site uses exactly one value.
+	 */
+	qualities?: readonly number[];
+	/** Quality applied when the request names none. Defaults to 82. */
+	quality?: number;
+	/**
+	 * Where rendered variants are kept.
+	 *
+	 * Without it every request re-decodes, which is survivable in development
+	 * and is not a thing to run in production.
+	 */
+	cacheDir?: string;
+	/** `max-age`, in seconds. Defaults to a year. */
+	maxAge?: number;
+}
+
 export interface PrismConfig {
 	/** Applied to every operation that does not pass its own. */
 	limits?: Limits;
 	/** Default output quality. */
 	quality?: number;
+	/**
+	 * Mount the transformation endpoint `<Image>` points at.
+	 *
+	 * Absent by default: a route that reads files off disk and spends CPU on
+	 * demand is not something a package should add to an application because
+	 * the package happened to be installed.
+	 *
+	 * See `ImageServingConfig` for what each list guards.
+	 */
+	serve?: ImageServingConfig;
 	/**
 	 * Apply the EXIF orientation on decode. Default `true`.
 	 *

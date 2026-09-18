@@ -19,6 +19,12 @@ export {
 	PrismError,
 	PrismNativeRequiredError,
 } from "./errors.js";
+export {
+	DEFAULT_WIDTHS,
+	type ImageHttpContext,
+	type ImageRouter,
+	registerImageRoute,
+} from "./ImageEndpoint.js";
 export { isNativeAvailable } from "./native.js";
 export { defineConfig, Pipeline, Prism } from "./Prism.js";
 export type {
@@ -29,6 +35,7 @@ export type {
 	CropOptions,
 	Fit,
 	ImageFormat,
+	ImageServingConfig,
 	Limits,
 	Metadata,
 	Operation,
