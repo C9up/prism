@@ -55,6 +55,12 @@ concurrency:
 #   silently produce the un-shippable artefact. The failure mode is invisible
 #   until a user installs it.
 #
+#   The internal path needs pkg-config as well, which is easy to miss: it does
+#   not link a system dav1d, but it still asks pkg-config for the flags of the
+#   one it just compiled, reading the `.pc` meson leaves in `meson-private`.
+#   Linux and macOS images ship it; Windows does not, and the build script
+#   panics there only AFTER cloning and compiling dav1d.
+#
 #   One more reason to be explicit: `dav1d-sys`'s build script runs meson and
 #   ninja through `.output().expect(...)`, which checks that the process could
 #   be SPAWNED and not that it succeeded. With nasm missing, meson fails, the
@@ -137,7 +143,12 @@ jobs:
           # x86/x86_64 and does not ask for it on aarch64.
           - { os: ubuntu-latest,    suffix: linux-x64-gnu,   target: x86_64-unknown-linux-gnu,  nasm: true }
           - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, nasm: false }
-          - { os: macos-13,         suffix: darwin-x64,      target: x86_64-apple-darwin,       nasm: true }
+          # `macos-15-intel`, not `macos-13`: the macOS 13 image was retired on
+          # 2025-12-04 and a job asking for it now queues forever rather than
+          # failing. This is the LAST x86_64 image Actions offers, and it is
+          # announced only until August 2027 — after that, darwin-x64 needs a
+          # meson cross-file or the target goes away.
+          - { os: macos-15-intel,   suffix: darwin-x64,      target: x86_64-apple-darwin,       nasm: true }
           - { os: macos-14,         suffix: darwin-arm64,    target: aarch64-apple-darwin,      nasm: false }
           - { os: windows-latest,   suffix: win32-x64-msvc,  target: x86_64-pc-windows-msvc,    nasm: true }
     steps:
@@ -170,6 +181,36 @@ jobs:
           choco install nasm --no-progress -y
           # choco drops nasm outside PATH for the current job.
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # pkg-config, which Linux and macOS images already carry.
+          #
+          # `dav1d-sys` needs it even on the INTERNAL build path: it clones and
+          # builds dav1d with meson, then reads the resulting flags out of
+          # `meson-private` by running pkg-config. Without it the build script
+          # panics after a successful compile:
+          #   BuildInternalClosureError("dav1d", PkgConfig(... could not be found))
+          #
+          # `--allow-empty-checksums` because the pkgconfiglite package points at
+          # a SourceForge zip that is re-rolled in place, so its recorded
+          # checksum drifts and the install fails on a file that is fine.
+          choco install pkgconfiglite --no-progress -y --allow-empty-checksums
+          # meson picks its OWN C compiler, and this image carries MinGW on
+          # PATH. Left to itself it built libdav1d.a with GCC, whose objects
+          # reference MinGW runtime symbols — `___chkstk_ms`, `__mingw_vfprintf`
+          # — that MSVC's link.exe cannot resolve. Rust links the msvc target
+          # with link.exe, so the two ABIs only met at the final link, after a
+          # complete and apparently successful dav1d build.
+          #
+          # Naming the compiler is what settles it: meson honours CC/CXX, and
+          # the step below puts the Visual Studio environment on PATH so `cl`
+          # is actually there to be found.
+          "CC=cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=cl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Puts cl.exe, the MSVC headers and libs on PATH (vcvarsall). Without it
+      # `CC=cl` names a compiler the shell cannot find.
+      - name: Visual Studio environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: The tooling is really there
         shell: bash
@@ -179,7 +220,13 @@ jobs:
           # so a missing one produces a silently wrong artefact, not an error.
           meson --version
           ninja --version
+          # dav1d-sys shells out to this one too, to read back the flags of the
+          # dav1d it just built. Missing, it fails AFTER the whole compile.
+          pkg-config --version
           if [ "${{ matrix.nasm }}" = "true" ]; then nasm -v; fi
+          # On Windows, prove the C compiler meson will pick is the MSVC one
+          # that link.exe can work with, not the MinGW gcc also on PATH.
+          if [ "${{ runner.os }}" = "Windows" ]; then cl 2>&1 | head -1; fi
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
