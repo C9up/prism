@@ -1,0 +1,22 @@
+---
+to: config/images.ts
+---
+import { defineConfig } from '@c9up/prism'
+import env from '#start/env'
+
+export default defineConfig({
+  limits: {
+    // The decompression-bomb bound. A 40 KB PNG can declare 50000x50000,
+    // and decoding it asks for ten gigabytes before anything objects.
+    maxPixels: Number(env.get('IMAGE_MAX_PIXELS', '50000000')),
+    // 64 MiB.
+    maxBytes: 64 * 1024 * 1024,
+  },
+
+  // Default output quality for formats that have the knob.
+  quality: 82,
+
+  // Apply the EXIF orientation on decode. Turning this off serves the
+  // sensor's pixels, which is almost never what a viewer expects.
+  autoOrient: true,
+})

@@ -1,6 +1,6 @@
 {
   "name": "@c9up/prism",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Prism — image processing for the Ream framework: resize, convert, crop, composite and watermark, on a Rust engine (TypeScript + Rust N-API)",
   "license": "MIT",
   "type": "module",
@@ -10,6 +10,7 @@
     "LICENSE",
     "README.md",
     "dist",
+    "stubs",
     "index.*.node",
     "scripts",
     "src"
@@ -49,14 +50,14 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
-    "@c9up/ream": "^0.2.0",
+    "@c9up/ream": "^0.2.26",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.11",
     "typescript": "^6.0.3",
     "vitest": "4.1.11"
   },
   "peerDependencies": {
-    "@c9up/ream": "^0.2.0"
+    "@c9up/ream": "^0.2.26"
   },
   "peerDependenciesMeta": {
     "@c9up/ream": {
