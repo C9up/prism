@@ -122,6 +122,27 @@ A box filter rather than Lanczos: several times cheaper and visibly softer,
 which is the right trade for a 32px avatar and the wrong one for a 1200px
 hero. `exact: true` ignores the aspect ratio, as `fit: 'fill'` does.
 
+### QR codes
+
+```ts
+import { qrcode } from '@c9up/prism'
+
+const svg = await qrcode.toString(uri)                          // SVG, the npm `qrcode` shape
+const png = await qrcode.toBuffer(uri, { width: 300 })          // or type: 'webp' | 'avif'
+
+// Styled, with qr-code-styling's options: shapes, gradients, a logo.
+const styled = await qrcode.toString(uri, {
+  dotsOptions: { type: 'rounded', color: '#1e3a8a' },
+  cornersSquareOptions: { type: 'extra-rounded' },
+  image: logoBytes,
+})
+```
+
+Text beyond a QR code's capacity, an image over 4096 px a side, colours that
+are not strict hex and styles that would not scan — too little contrast, a logo
+over half the error correction — are refused: every option may come from a
+request.
+
 ## Safety
 
 Every byte reaching this package came from an upload, and the guards run

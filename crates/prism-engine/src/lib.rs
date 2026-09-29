@@ -14,9 +14,12 @@ pub mod error;
 pub mod exif;
 pub mod guard;
 pub mod ops;
+pub mod qr;
 pub mod text;
 
-use image::{DynamicImage, ImageFormat};
+use image::DynamicImage;
+/// The format an output is encoded as, as `parse_format` names it.
+pub use image::ImageFormat;
 
 pub use error::EngineError;
 pub use guard::Limits;
@@ -166,7 +169,11 @@ pub fn inspect(bytes: &[u8], limits: Limits) -> Result<Metadata, EngineError> {
 }
 
 /// Decode, guarded.
-fn decode(bytes: &[u8], limits: Limits, auto_orient: bool) -> Result<DynamicImage, EngineError> {
+pub(crate) fn decode(
+    bytes: &[u8],
+    limits: Limits,
+    auto_orient: bool,
+) -> Result<DynamicImage, EngineError> {
     // Probe FIRST. `load_from_memory` would happily allocate the fifty
     // thousand square pixels a four-kilobyte file can declare.
     guard::probe(bytes, limits)?;

@@ -402,3 +402,191 @@ pub fn process(
         auto_orient: auto_orient.unwrap_or(true),
     }))
 }
+
+/// QR code options, in the names of the npm `qrcode` package. The numbers
+/// arrive as JavaScript numbers and are validated in the engine: converted to
+/// `u32` here, a negative margin would wrap to four billion first.
+#[napi(object)]
+pub struct JsQrOptions {
+    pub error_correction_level: Option<String>,
+    pub version: Option<f64>,
+    pub margin: Option<f64>,
+    pub scale: Option<f64>,
+    pub width: Option<f64>,
+    pub dark: Option<String>,
+    pub light: Option<String>,
+    /// The `qr-code-styling` options, in its names.
+    pub dots_options: Option<JsQrFigure>,
+    pub corners_square_options: Option<JsQrFigure>,
+    pub corners_dot_options: Option<JsQrFigure>,
+    pub background_options: Option<JsQrBackground>,
+    /// The logo's bytes; the engine probes and decodes them under its limits.
+    pub image: Option<Buffer>,
+    pub image_options: Option<JsQrImageOptions>,
+}
+
+#[napi(object)]
+pub struct JsQrColorStop {
+    pub offset: f64,
+    pub color: String,
+}
+
+#[napi(object)]
+pub struct JsQrGradient {
+    #[napi(js_name = "type")]
+    pub kind: Option<String>,
+    pub rotation: Option<f64>,
+    pub color_stops: Vec<JsQrColorStop>,
+}
+
+#[napi(object)]
+pub struct JsQrFigure {
+    #[napi(js_name = "type")]
+    pub kind: Option<String>,
+    pub color: Option<String>,
+    pub gradient: Option<JsQrGradient>,
+}
+
+#[napi(object)]
+pub struct JsQrBackground {
+    pub round: Option<f64>,
+    pub color: Option<String>,
+    pub gradient: Option<JsQrGradient>,
+}
+
+#[napi(object)]
+pub struct JsQrImageOptions {
+    pub image_size: Option<f64>,
+    pub margin: Option<f64>,
+    pub hide_background_dots: Option<bool>,
+}
+
+fn qr_gradient_of(gradient: JsQrGradient) -> prism_engine::qr::Gradient {
+    prism_engine::qr::Gradient {
+        kind: gradient.kind,
+        rotation: gradient.rotation,
+        color_stops: gradient
+            .color_stops
+            .into_iter()
+            .map(|stop| prism_engine::qr::ColorStop {
+                offset: stop.offset,
+                color: stop.color,
+            })
+            .collect(),
+    }
+}
+
+fn qr_figure_of(figure: JsQrFigure) -> prism_engine::qr::Figure {
+    prism_engine::qr::Figure {
+        kind: figure.kind,
+        color: figure.color,
+        gradient: figure.gradient.map(qr_gradient_of),
+    }
+}
+
+fn qr_options_of(options: Option<JsQrOptions>) -> prism_engine::qr::QrOptions {
+    match options {
+        None => prism_engine::qr::QrOptions::default(),
+        Some(options) => prism_engine::qr::QrOptions {
+            error_correction_level: options.error_correction_level,
+            version: options.version,
+            margin: options.margin,
+            scale: options.scale,
+            width: options.width,
+            dark: options.dark,
+            light: options.light,
+            dots: options.dots_options.map(qr_figure_of),
+            corners_square: options.corners_square_options.map(qr_figure_of),
+            corners_dot: options.corners_dot_options.map(qr_figure_of),
+            background: options
+                .background_options
+                .map(|background| prism_engine::qr::Background {
+                    round: background.round,
+                    color: background.color,
+                    gradient: background.gradient.map(qr_gradient_of),
+                }),
+            // Copied: the task outlives the call, and the JS heap owns the
+            // buffer (see `ProcessTask`).
+            image: options.image.map(|image| image.to_vec()),
+            image_options: options
+                .image_options
+                .map(|image| prism_engine::qr::ImageOptions {
+                    image_size: image.image_size,
+                    margin: image.margin,
+                    hide_background_dots: image.hide_background_dots,
+                }),
+        },
+    }
+}
+
+pub struct QrSvgTask {
+    text: String,
+    options: prism_engine::qr::QrOptions,
+}
+
+impl Task for QrSvgTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("writing a QR code", || {
+            prism_engine::qr::svg(&self.text, &self.options)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// A QR code as an SVG document, on a worker thread: a logo is decoded and
+/// re-encoded, which is not work for the event loop.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn qr_svg(text: String, options: Option<JsQrOptions>) -> AsyncTask<QrSvgTask> {
+    AsyncTask::new(QrSvgTask {
+        text,
+        options: qr_options_of(options),
+    })
+}
+
+pub struct QrImageTask {
+    text: String,
+    options: prism_engine::qr::QrOptions,
+    format: prism_engine::ImageFormat,
+    quality: u8,
+}
+
+impl Task for QrImageTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded("rendering a QR code", || {
+            prism_engine::qr::image(&self.text, &self.options, self.format, self.quality)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(Buffer::from(output))
+    }
+}
+
+/// A QR code as an image, on a worker thread: AVIF encoding is not quick.
+#[napi(ts_return_type = "Promise<Buffer>")]
+pub fn qr_image(
+    text: String,
+    format: String,
+    options: Option<JsQrOptions>,
+    quality: Option<u32>,
+) -> Result<AsyncTask<QrImageTask>> {
+    let format = guard::parse_format(&format)
+        .map_err(|error| Error::new(Status::InvalidArg, format!("{}: {}", error.code(), error)))?;
+    Ok(AsyncTask::new(QrImageTask {
+        text,
+        options: qr_options_of(options),
+        format,
+        // Lossless by default: a QR code compresses well without loss, and
+        // lossy artefacts on module edges are what makes a scanner hesitate.
+        quality: quality.unwrap_or(100).clamp(1, 100) as u8,
+    }))
+}

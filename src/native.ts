@@ -11,7 +11,12 @@
  */
 
 import { fromEngine, PrismNativeRequiredError } from "./errors.js";
-import type { JsLimits, JsOperation, JsOutput } from "./native/generated.js";
+import type {
+	JsLimits,
+	JsOperation,
+	JsOutput,
+	JsQrOptions,
+} from "./native/generated.js";
 import type { Limits, Metadata, Operation, OutputOptions } from "./types.js";
 import {
 	loadNativeBinary,
@@ -183,6 +188,34 @@ export async function processNative(
 			limitsOf(limits),
 			autoOrient,
 		);
+	} catch (error) {
+		throw fromEngine(error);
+	}
+}
+
+/** A QR code as an SVG document. */
+export async function qrSvgNative(
+	text: string,
+	options: JsQrOptions,
+): Promise<string> {
+	const loaded = engine();
+	try {
+		return await loaded.qrSvg(text, options);
+	} catch (error) {
+		throw fromEngine(error);
+	}
+}
+
+/** A QR code as an image, encoded on a worker thread. */
+export async function qrImageNative(
+	text: string,
+	format: string,
+	options: JsQrOptions,
+	quality?: number,
+): Promise<Buffer> {
+	const loaded = engine();
+	try {
+		return await loaded.qrImage(text, format, options, quality);
 	} catch (error) {
 		throw fromEngine(error);
 	}

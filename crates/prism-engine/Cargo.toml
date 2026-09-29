@@ -45,7 +45,21 @@ kamadak-exif = "0.6"
 # only — no shaping engine, see `text.rs`.
 ab_glyph = "0.2"
 
+# QR codes: the matrix only. Its own `image` and SVG renderers are left out —
+# Prism rasterises with the `image` above, and writes the SVG itself in the
+# shape of the npm `qrcode` package.
+qrcode = { version = "0.14.1", default-features = false }
+# Rasterising a styled QR code: the SVG Prism wrote, rendered as it is, so the
+# PNG and the SVG cannot drift apart. No text, fonts or embedded raster
+# images — the SVG has none, and the logo is decoded by Prism's own guarded
+# path and composited after.
+resvg = { version = "0.48.1", default-features = false }
+
 [dev-dependencies]
+# Reading a generated QR code back: the proof that it scans. rxing is ZXing,
+# the decoder most phone scanners are built on; rqrr was tried first and
+# cannot find a round finder pattern that ZXing and phones read.
+rxing = { version = "0.9.3", default-features = false, features = ["qrcode", "decoders", "encoding_rs"] }
 # Proving the output carries no EXIF block: the test reads with the same
 # library the engine uses, so a change in either is caught by the other.
 # Lossy WebP. `image`'s own encoder is lossless-only, and lossless WebP is

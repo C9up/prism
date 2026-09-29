@@ -106,6 +106,59 @@ export interface JsOutput {
 }
 
 /**
+ * QR code options, in the names of the npm `qrcode` package. The numbers
+ * arrive as JavaScript numbers and are validated in the engine: converted to
+ * `u32` here, a negative margin would wrap to four billion first.
+ */
+
+export interface JsQrOptions {
+	errorCorrectionLevel?: string;
+	version?: number;
+	margin?: number;
+	scale?: number;
+	width?: number;
+	dark?: string;
+	light?: string;
+	/** The `qr-code-styling` options, in its names. */
+	dotsOptions?: JsQrFigure;
+	cornersSquareOptions?: JsQrFigure;
+	cornersDotOptions?: JsQrFigure;
+	backgroundOptions?: JsQrBackground;
+	/** The logo's bytes; the engine probes and decodes them under its limits. */
+	image?: Buffer;
+	imageOptions?: JsQrImageOptions;
+}
+
+export interface JsQrColorStop {
+	offset: number;
+	color: string;
+}
+
+export interface JsQrGradient {
+	type?: string;
+	rotation?: number;
+	colorStops: Array<JsQrColorStop>;
+}
+
+export interface JsQrFigure {
+	type?: string;
+	color?: string;
+	gradient?: JsQrGradient;
+}
+
+export interface JsQrBackground {
+	round?: number;
+	color?: string;
+	gradient?: JsQrGradient;
+}
+
+export interface JsQrImageOptions {
+	imageSize?: number;
+	margin?: number;
+	hideBackgroundDots?: boolean;
+}
+
+/**
  * Identify an image from its header. Synchronous: it reads a few hundred
  * bytes and never allocates a pixel buffer.
  */
@@ -130,4 +183,23 @@ export declare function process(
 	output: JsOutput,
 	limits?: JsLimits | undefined | null,
 	autoOrient?: boolean | undefined | null,
+): Promise<Buffer>;
+
+/**
+ * A QR code as an SVG document, on a worker thread: a logo is decoded and
+ * re-encoded, which is not work for the event loop.
+ */
+
+export declare function qrSvg(
+	text: string,
+	options?: JsQrOptions | undefined | null,
+): Promise<string>;
+
+/** A QR code as an image, on a worker thread: AVIF encoding is not quick. */
+
+export declare function qrImage(
+	text: string,
+	format: string,
+	options?: JsQrOptions | undefined | null,
+	quality?: number | undefined | null,
 ): Promise<Buffer>;

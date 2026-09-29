@@ -35,6 +35,12 @@ pub enum EngineError {
     Font(String),
     /// A colour space that cannot be named, or a conversion the model refuses.
     ColourSpace(String),
+    /// More text than a QR code can hold at the chosen level and version.
+    QrTooLong {
+        bytes: usize,
+    },
+    /// A QR code option out of range, or a colour that is not strict hex.
+    QrOption(String),
 }
 
 impl EngineError {
@@ -54,6 +60,8 @@ impl EngineError {
             Self::Geometry(_) => "INVALID_GEOMETRY",
             Self::Font(_) => "INVALID_FONT",
             Self::ColourSpace(_) => "COLOUR_SPACE",
+            Self::QrTooLong { .. } => "QR_TOO_LONG",
+            Self::QrOption(_) => "INVALID_QR_OPTION",
         }
     }
 }
@@ -84,6 +92,11 @@ impl fmt::Display for EngineError {
             Self::Geometry(why) => write!(f, "{why}"),
             Self::Font(why) => write!(f, "the font could not be read: {why}"),
             Self::ColourSpace(why) => write!(f, "{why}"),
+            Self::QrTooLong { bytes } => write!(
+                f,
+                "{bytes} bytes do not fit in a QR code at this error-correction level and version"
+            ),
+            Self::QrOption(why) => write!(f, "{why}"),
         }
     }
 }

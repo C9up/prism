@@ -27,6 +27,21 @@ export {
 } from "./ImageEndpoint.js";
 export { isNativeAvailable } from "./native.js";
 export { defineConfig, Pipeline, Prism } from "./Prism.js";
+export {
+	type QRCodeCornerDotType,
+	type QRCodeCornerSquareType,
+	type QRCodeDotType,
+	type QRCodeErrorCorrectionLevel,
+	type QRCodeFigureOptions,
+	type QRCodeGradient,
+	type QRCodeImageType,
+	type QRCodeOptions,
+	type QRCodeStringType,
+	type QRCodeToBufferOptions,
+	type QRCodeToDataURLOptions,
+	type QRCodeToStringOptions,
+	qrcode,
+} from "./qrcode.js";
 export type {
 	ColorSpace,
 	Colour,
