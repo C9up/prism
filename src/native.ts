@@ -220,3 +220,19 @@ export async function qrImageNative(
 		throw fromEngine(error);
 	}
 }
+
+/**
+ * A QR-bill payload's module matrix. Synchronous: at most 997 bytes, and
+ * the bill is built synchronously around it.
+ */
+export function qrSwissMatrixNative(payload: string): {
+	size: number;
+	modules: Uint8Array;
+} {
+	const loaded = engine();
+	try {
+		return loaded.qrSwissMatrix(payload);
+	} catch (error) {
+		throw fromEngine(error);
+	}
+}

@@ -143,6 +143,39 @@ are not strict hex and styles that would not scan — too little contrast, a log
 over half the error correction — are refused: every option may come from a
 request.
 
+### Swiss QR-bills
+
+The payment slip of a Swiss invoice, with `swissqrbill`'s API (4.4.2) under
+`@c9up/prism/swissqrbill/*` — `pdf`, `svg`, `utils`, `errors`, `types` — so
+moving over changes the imports and nothing else:
+
+```ts
+import PDFDocument from 'pdfkit'
+import { SwissQRBill } from '@c9up/prism/swissqrbill/pdf'
+import { ValidationError } from '@c9up/prism/swissqrbill/errors'
+import { isQRIBAN, calculateQRReferenceChecksum } from '@c9up/prism/swissqrbill/utils'
+
+const bill = new SwissQRBill(data, { language: 'FR' }) // validates: throws a ValidationError
+bill.attachTo(doc)                                     // the slip at the page's foot, or on a page of its own
+
+const svg = new (await import('@c9up/prism/swissqrbill/svg')).SwissQRBill(data).toString()
+```
+
+The slip is drawn in vector into the PDFKit document the application owns —
+PDFKit is not a dependency of this package. The SVG is upstream's byte for
+byte and the PDF is drawn with upstream's calls in upstream's order, both
+proved against `swissqrbill` itself in the tests; the symbol is encoded by
+the engine with the same mask upstream's encoder picks, so it is the same QR
+code, module for module.
+
+A `ValidationError` carries `swissqrbill`'s own code (`CREDITOR_ACCOUNT_IS_INVALID`,
+`QR_REFERENCE_IS_INVALID`…) and extends `PrismError`. Named differences: a
+payload too long for the symbol is refused by the constructor, with
+`E_PRISM_QR_TOO_LONG`; SVG attributes are escaped; a character outside
+upstream's width tables no longer breaks the SVG's lines one word each; a
+creditor reference is checked without regard to case; the SVG classes return
+a string only (no DOM `element`); no `Table`.
+
 ## Safety
 
 Every byte reaching this package came from an upload, and the guards run

@@ -159,6 +159,16 @@ export interface JsQrImageOptions {
 }
 
 /**
+ * A QR-bill's module matrix: `size` × `size`, row by row, one byte a module
+ * (1 dark, 0 light).
+ */
+
+export interface JsQrMatrix {
+	size: number;
+	modules: Buffer;
+}
+
+/**
  * Identify an image from its header. Synchronous: it reads a few hundred
  * bytes and never allocates a pixel buffer.
  */
@@ -203,3 +213,10 @@ export declare function qrImage(
 	options?: JsQrOptions | undefined | null,
 	quality?: number | undefined | null,
 ): Promise<Buffer>;
+
+/**
+ * The Swiss QR code's matrix, synchronously: a payload holds at most 997
+ * bytes, and the bill that draws it is laid out synchronously too.
+ */
+
+export declare function qrSwissMatrix(payload: string): JsQrMatrix;

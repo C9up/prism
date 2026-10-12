@@ -590,3 +590,31 @@ pub fn qr_image(
         quality: quality.unwrap_or(100).clamp(1, 100) as u8,
     }))
 }
+
+/// A QR-bill's module matrix: `size` × `size`, row by row, one byte a module
+/// (1 dark, 0 light).
+#[napi(object)]
+pub struct JsQrMatrix {
+    pub size: u32,
+    pub modules: Buffer,
+}
+
+/// The Swiss QR code's matrix, synchronously: a payload holds at most 997
+/// bytes, and the bill that draws it is laid out synchronously too.
+#[napi]
+pub fn qr_swiss_matrix(payload: String) -> Result<JsQrMatrix> {
+    guarded("encoding a Swiss QR code", || {
+        prism_engine::qr::swiss::matrix(&payload)
+    })
+    .map(|matrix| JsQrMatrix {
+        // At most 117 modules (version 25).
+        size: matrix.size as u32,
+        modules: Buffer::from(
+            matrix
+                .modules
+                .into_iter()
+                .map(u8::from)
+                .collect::<Vec<u8>>(),
+        ),
+    })
+}

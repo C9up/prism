@@ -23,6 +23,7 @@ use crate::encode::encode;
 use crate::error::EngineError;
 
 mod style;
+pub mod swiss;
 
 pub use style::{Background, ColorStop, Figure, Gradient, ImageOptions};
 

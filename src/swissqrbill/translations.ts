@@ -1,0 +1,91 @@
+/** The bill's printed labels, as `swissqrbill` (4.4.2) words them. */
+
+import type { Language } from "./types.js";
+
+export interface Translation {
+	acceptancePoint: string;
+	account: string;
+	additionalInformation: string;
+	amount: string;
+	currency: string;
+	inFavourOf: string;
+	payableBy: string;
+	payableByName: string;
+	paymentPart: string;
+	receipt: string;
+	reference: string;
+	separate: string;
+}
+
+export const translations: Record<Language, Translation> = {
+	DE: {
+		acceptancePoint: "Annahmestelle",
+		account: "Konto / Zahlbar an",
+		additionalInformation: "Zusätzliche Informationen",
+		amount: "Betrag",
+		currency: "Währung",
+		inFavourOf: "Zugunsten",
+		payableBy: "Zahlbar durch",
+		payableByName: "Zahlbar durch (Name/Adresse)",
+		paymentPart: "Zahlteil",
+		receipt: "Empfangsschein",
+		reference: "Referenz",
+		separate: "Vor der Einzahlung abzutrennen",
+	},
+	EN: {
+		acceptancePoint: "Acceptance point",
+		account: "Account / Payable to",
+		additionalInformation: "Additional information",
+		amount: "Amount",
+		currency: "Currency",
+		inFavourOf: "In favour of",
+		payableBy: "Payable by",
+		payableByName: "Payable by (name/address)",
+		paymentPart: "Payment part",
+		receipt: "Receipt",
+		reference: "Reference",
+		separate: "Separate before paying in",
+	},
+	FR: {
+		acceptancePoint: "Point de dépôt",
+		account: "Compte / Payable à",
+		additionalInformation: "Informations supplémentaires",
+		amount: "Montant",
+		currency: "Monnaie",
+		inFavourOf: "En faveur de",
+		payableBy: "Payable par",
+		payableByName: "Payable par (nom/adresse)",
+		paymentPart: "Section paiement",
+		receipt: "Récépissé",
+		reference: "Référence",
+		separate: "A détacher avant le versement",
+	},
+	IT: {
+		acceptancePoint: "Punto di accettazione",
+		account: "Conto / Pagabile a",
+		additionalInformation: "Informazioni supplementari",
+		amount: "Importo",
+		currency: "Valuta",
+		inFavourOf: "A favore di",
+		payableBy: "Pagabile da",
+		payableByName: "Pagabile da (nome/indirizzo)",
+		paymentPart: "Sezione pagamento",
+		receipt: "Ricevuta",
+		reference: "Riferimento",
+		separate: "Da staccare prima del versamento",
+	},
+	RM: {
+		acceptancePoint: "Post da recepziun",
+		account: "Conto / Da pajar a",
+		additionalInformation: "Infurmaziuns supplementaras",
+		amount: "Import",
+		currency: "Valuta",
+		inFavourOf: "A favur da",
+		payableBy: "Da pajar da",
+		payableByName: "Da pajar da (num/adressa)",
+		paymentPart: "Part da pajament",
+		receipt: "Quittanza",
+		reference: "Referenza",
+		separate: "Da distatgar avant che pajar",
+	},
+};

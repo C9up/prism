@@ -35,6 +35,26 @@
     "./testing": {
       "types": "./src/testing/main.ts",
       "import": "./src/testing/main.ts"
+    },
+    "./swissqrbill/pdf": {
+      "types": "./src/swissqrbill/pdf.ts",
+      "import": "./src/swissqrbill/pdf.ts"
+    },
+    "./swissqrbill/svg": {
+      "types": "./src/swissqrbill/svg.ts",
+      "import": "./src/swissqrbill/svg.ts"
+    },
+    "./swissqrbill/utils": {
+      "types": "./src/swissqrbill/utils.ts",
+      "import": "./src/swissqrbill/utils.ts"
+    },
+    "./swissqrbill/errors": {
+      "types": "./src/swissqrbill/errors.ts",
+      "import": "./src/swissqrbill/errors.ts"
+    },
+    "./swissqrbill/types": {
+      "types": "./src/swissqrbill/types.ts",
+      "import": "./src/swissqrbill/types.ts"
     }
   },
   "scripts": {
@@ -52,7 +72,10 @@
     "@biomejs/biome": "^2.5.12",
     "@c9up/ream": "^0.2.25",
     "@types/node": "^22.20.1",
+    "@types/pdfkit": "^0.17.6",
     "@vitest/coverage-v8": "4.1.11",
+    "pdfkit": "^0.19.1",
+    "swissqrbill": "4.4.2",
     "typescript": "^6.0.3",
     "vitest": "4.1.11"
   },
@@ -91,6 +114,26 @@
       "./testing": {
         "types": "./dist/testing/main.d.ts",
         "import": "./dist/testing/main.js"
+      },
+      "./swissqrbill/pdf": {
+        "types": "./dist/swissqrbill/pdf.d.ts",
+        "import": "./dist/swissqrbill/pdf.js"
+      },
+      "./swissqrbill/svg": {
+        "types": "./dist/swissqrbill/svg.d.ts",
+        "import": "./dist/swissqrbill/svg.js"
+      },
+      "./swissqrbill/utils": {
+        "types": "./dist/swissqrbill/utils.d.ts",
+        "import": "./dist/swissqrbill/utils.js"
+      },
+      "./swissqrbill/errors": {
+        "types": "./dist/swissqrbill/errors.d.ts",
+        "import": "./dist/swissqrbill/errors.js"
+      },
+      "./swissqrbill/types": {
+        "types": "./dist/swissqrbill/types.d.ts",
+        "import": "./dist/swissqrbill/types.js"
       }
     },
     "access": "public"
