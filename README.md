@@ -163,15 +163,17 @@ const svg = new (await import('@c9up/prism/swissqrbill/svg')).SwissQRBill(data).
 
 The slip is drawn in vector into the PDFKit document the application owns —
 PDFKit is not a dependency of this package. The SVG is upstream's byte for
-byte and the PDF is drawn with upstream's calls in upstream's order, both
-proved against `swissqrbill` itself in the tests; the symbol is encoded by
-the engine with the same mask upstream's encoder picks, so it is the same QR
-code, module for module.
+byte but for the QR code, and the PDF is drawn with upstream's calls in
+upstream's order, both proved against `swissqrbill` itself in the tests; the
+symbol is encoded by the engine with the same mask upstream's encoder picks,
+so it is the same QR code, module for module.
 
 A `ValidationError` carries `swissqrbill`'s own code (`CREDITOR_ACCOUNT_IS_INVALID`,
 `QR_REFERENCE_IS_INVALID`…) and extends `PrismError`. Named differences: a
 payload too long for the symbol is refused by the constructor, with
-`E_PRISM_QR_TOO_LONG`; SVG attributes are escaped; a character outside
+`E_PRISM_QR_TOO_LONG`; the SVG's QR code is one path (about 12 KB for the
+whole slip, where a rectangle per module makes it 210); SVG attributes are
+escaped; a character outside
 upstream's width tables no longer breaks the SVG's lines one word each; a
 creditor reference is checked without regard to case; the SVG classes return
 a string only (no DOM `element`); no `Table`.

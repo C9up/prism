@@ -1,8 +1,9 @@
 /**
  * `swissqrbill` — the QR-bill ported from `swissqrbill` 4.4.2, proved against
- * that package itself: the same SVG byte for byte (the QR code's modules
- * included), the same PDFKit calls in the same order, the same refusals, the
- * same utilities. That the symbol reads back as the payload is proved in the
+ * that package itself: the same SVG byte for byte outside the QR code, and
+ * the QR code's modules one for one (drawn as one path, where upstream draws a
+ * rectangle each), the same PDFKit calls in the same order, the same refusals,
+ * the same utilities. That the symbol reads back as the payload is proved in the
  * engine (crates/prism-engine/src/qr/swiss.rs, decoded by rxing).
  */
 
@@ -190,15 +191,91 @@ function thrown(build: () => unknown): Error {
 	throw new Error("expected a throw");
 }
 
+/** One row of the path: `M<x> <y>.5h<n>`, then `m<gap> 0h<n>` per run. */
+const ROW = /M(\d+) (\d+)\.5h(\d+)((?:m\d+ 0h\d+)*)/g;
+
+/** The QR code's path, its modules as "column,row", and the SVG without it. */
+function ourModules(svg: string): {
+	count: number;
+	modules: Set<string>;
+	rest: string;
+} {
+	const match =
+		/<svg width="[^"]+" height="[^"]+" viewBox="0 0 (\d+) \1" shape-rendering="crispEdges"><path stroke="black" d="([^"]*)" \/><\/svg>/.exec(
+			svg,
+		);
+	if (!match) throw new Error("no QR path");
+	const [whole, count = "", d = ""] = match;
+	// Nothing in the path but rows of runs.
+	expect(d.replace(ROW, "")).toBe("");
+	const modules = new Set<string>();
+	for (const [, x = "", y = "", first = "", more = ""] of d.matchAll(ROW)) {
+		let cursor = Number(x);
+		const runs = [Number(first)];
+		const gaps = [0];
+		for (const [, gap = "", length = ""] of more.matchAll(/m(\d+) 0h(\d+)/g)) {
+			gaps.push(Number(gap));
+			runs.push(Number(length));
+		}
+		runs.forEach((length, i) => {
+			cursor += gaps[i] ?? 0;
+			for (let k = 0; k < length; k++) modules.add(`${cursor + k},${y}`);
+			cursor += length;
+		});
+	}
+	return { count: Number(count), modules, rest: svg.replace(whole, "") };
+}
+
+/** Upstream's module rectangles as "column,row", and the SVG without them. */
+function upstreamModules(
+	svg: string,
+	size: number,
+	count: number,
+): { modules: Set<string>; rest: string } {
+	const block = size / count;
+	const side = `${block}mm`.replace(/\./g, "\\.");
+	const rect = new RegExp(
+		`<rect x="([^"]+)mm" y="([^"]+)mm" width="${side}" height="${side}" fill="black" />`,
+		"g",
+	);
+	const modules = new Set<string>();
+	const rest = svg.replace(rect, (_rect, x: string, y: string) => {
+		modules.add(
+			`${Math.round(Number(x) / block)},${Math.round(Number(y) / block)}`,
+		);
+		return "";
+	});
+	return { modules, rest };
+}
+
+/** Upstream's SVG, but for the QR code: the same modules, as one path. */
+function expectUpstreamSVG(ours: string, theirs: string, size = 46): void {
+	const own = ourModules(ours);
+	const upstream = upstreamModules(theirs, size, own.count);
+	expect(upstream.modules.size).toBeGreaterThan(0);
+	expect(own.modules).toEqual(upstream.modules);
+	expect(own.rest).toBe(upstream.rest);
+}
+
 describe("prism > swissqrbill/svg", () => {
 	it.each(CASES)(
-		"writes upstream's SVG, byte for byte: $name",
+		"writes upstream's SVG, the QR code as one path: $name",
 		({ data, options }) => {
-			expect(new SVGBill(data, options).toString()).toBe(
+			expectUpstreamSVG(
+				new SVGBill(data, options).toString(),
 				new UpstreamSVGBill(data, options).toString(),
 			);
 		},
 	);
+
+	it("draws the QR code in a few kilobytes, where upstream needs some 190", () => {
+		const { data } = CASES[0] ?? { data: undefined };
+		if (!data) throw new Error("no case");
+		const ours = new SVGCode(data).toString().length;
+		const theirs = new UpstreamSVGCode(data).toString().length;
+		expect(ours).toBeLessThan(10_000);
+		expect(theirs).toBeGreaterThan(150_000);
+	});
 
 	it("wraps a long message and keeps the four lines it may take", () => {
 		const wide = CASES.find((entry) => entry.name.includes("too wide"));
@@ -215,11 +292,14 @@ describe("prism > swissqrbill/svg", () => {
 	it("writes upstream's QR code alone, at any size", () => {
 		const { data } = CASES[0] ?? { data: undefined };
 		if (!data) throw new Error("no case");
-		expect(new SVGCode(data).toString()).toBe(
+		expectUpstreamSVG(
+			new SVGCode(data).toString(),
 			new UpstreamSVGCode(data).toString(),
 		);
-		expect(new SVGCode(data, 30).toString()).toBe(
+		expectUpstreamSVG(
+			new SVGCode(data, 30).toString(),
 			new UpstreamSVGCode(data, 30).toString(),
+			30,
 		);
 	});
 
@@ -681,7 +761,8 @@ describe("prism > swissqrbill validation", () => {
 			},
 			message: "one\ntwo",
 		};
-		expect(new SVGBill(data).toString()).toBe(
+		expectUpstreamSVG(
+			new SVGBill(data).toString(),
 			new UpstreamSVGBill(data).toString(),
 		);
 	});

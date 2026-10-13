@@ -12,12 +12,15 @@
  *  - attribute values are escaped as text is (upstream writes them raw, and
  *    `fontName` reaches one);
  *  - an unknown character is measured as the widest one when lines are
- *    wrapped (see `characterWidth.ts`).
+ *    wrapped (see `characterWidth.ts`);
+ *  - the QR code is one path, in a child `<svg>` whose units are modules —
+ *    a few kilobytes, where upstream's rectangle per module weighs some 190.
+ *    The symbol and every other element are upstream's.
  */
 
 import { calculateTextWidth, type MeasuredSize } from "./characterWidth.js";
 import { cleanData } from "./cleaner.js";
-import { encodeQRCode, renderQRCode, renderSwissCross } from "./qrCode.js";
+import { encodeQRCode, qrCodePath, renderSwissCross } from "./qrCode.js";
 import { translations } from "./translations.js";
 import type { Data, Debtor, FontName, Language, SVGOptions } from "./types.js";
 import {
@@ -152,15 +155,16 @@ function root(width: string, height: string): Element {
 /** The symbol and its cross, drawn in millimetres on a `size` mm square. */
 function qrCodeElement(data: Data, size: number): Element {
 	const svg = root(`${size}mm`, `${size}mm`);
-	renderQRCode(encodeQRCode(data), size, (xPos, yPos, blockSize) => {
-		svg
-			.add("rect")
-			.x(`${xPos}mm`)
-			.y(`${yPos}mm`)
-			.attr("width", `${blockSize}mm`)
-			.attr("height", `${blockSize}mm`)
-			.attr("fill", "black");
-	});
+	const matrix = encodeQRCode(data);
+	svg
+		.add("svg")
+		.attr("width", `${size}mm`)
+		.attr("height", `${size}mm`)
+		.attr("viewBox", `0 0 ${matrix.size} ${matrix.size}`)
+		.attr("shape-rendering", "crispEdges")
+		.add("path")
+		.attr("stroke", "black")
+		.attr("d", qrCodePath(matrix));
 	renderSwissCross(size, (xPos, yPos, width, height, fillColor) => {
 		svg
 			.add("rect")

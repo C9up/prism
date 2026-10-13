@@ -81,6 +81,36 @@ export function renderQRCode(
 	}
 }
 
+/**
+ * The symbol's dark modules as one path, in modules, to be stroked one module
+ * wide — the form `qrcode.toString` writes: a row starts with `M<x> <y>.5`,
+ * each run is `h<length>`, and the gap to the next run a relative move. A few
+ * kilobytes, where a rectangle per module — upstream's SVG — is some 190.
+ */
+export function qrCodePath(matrix: QRMatrix): string {
+	let path = "";
+	for (let y = 0; y < matrix.size; y++) {
+		let end: number | undefined;
+		let x = 0;
+		while (x < matrix.size) {
+			if (matrix.modules[y * matrix.size + x] !== 1) {
+				x++;
+				continue;
+			}
+			const start = x;
+			while (x < matrix.size && matrix.modules[y * matrix.size + x] === 1) {
+				x++;
+			}
+			path +=
+				end === undefined
+					? `M${start} ${y}.5h${x - start}`
+					: `m${start - end} 0h${x - start}`;
+			end = x;
+		}
+	}
+	return path;
+}
+
 /** The swiss cross: 7 mm of white, 6 mm of black, the cross, on 46 mm. */
 export function renderSwissCross(
 	size: number,
