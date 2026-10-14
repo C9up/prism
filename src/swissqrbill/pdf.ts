@@ -59,7 +59,11 @@ export interface PDFKitDocument {
 	readonly y: number;
 	addContent(data: string): PDFKitDocument;
 	addPage(options: { margin: number; size: [number, number] }): PDFKitDocument;
-	dash(length: number, options: { size: number }): PDFKitDocument;
+	/** `size` is what upstream passes; PDFKit reads `space` and `phase`. */
+	dash(
+		length: number,
+		options?: { space?: number; phase?: number; size?: number },
+	): PDFKitDocument;
 	fill(): PDFKitDocument;
 	fillColor(color: string): PDFKitDocument;
 	font(name: string): PDFKitDocument;
