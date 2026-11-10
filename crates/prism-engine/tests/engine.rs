@@ -841,3 +841,218 @@ fn webp_quality_actually_moves_the_size() {
     };
     assert!(at(20) < at(90), "{} should be under {}", at(20), at(90));
 }
+
+// ─── Output bounds ──────────────────────────────────────────────────
+//
+// The input is bounded by its header; what an operation BUILDS is bounded by
+// the same ceiling. Rust aborts the process when an allocation fails — no
+// panic, nothing `catch_unwind` sees — so each of these must be refused
+// before `image` asks for the memory. Run without the bound, every one of
+// them takes the test process down.
+
+fn run(
+    input: &[u8],
+    operation: Operation,
+    limits: Limits,
+) -> Result<Vec<u8>, prism_engine::EngineError> {
+    process(input, &[operation], &output(ImageFormat::Png), limits, true)
+}
+
+#[test]
+fn refuses_a_resize_target_over_the_pixel_ceiling() {
+    let png = fixture(4, 4, ImageFormat::Png);
+    let error = run(
+        &png,
+        Operation::Resize {
+            width: Some(100_000),
+            height: Some(100_000),
+            fit: Fit::Fill,
+        },
+        Limits::default(),
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn refuses_an_exact_thumbnail_over_the_pixel_ceiling() {
+    let png = fixture(4, 4, ImageFormat::Png);
+    let error = run(
+        &png,
+        Operation::Thumbnail {
+            width: Some(100_000),
+            height: Some(100_000),
+            exact: true,
+        },
+        Limits::default(),
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn bounds_the_side_it_derives_from_the_aspect_ratio() {
+    // Only a width is asked for — the endpoint's shape — and a 1x4000 strip
+    // turns 60000 wide into 240 million tall.
+    let png = fixture(1, 4000, ImageFormat::Png);
+    for fit in [Fit::Contain, Fit::Cover, Fit::Fill] {
+        let error = run(
+            &png,
+            Operation::Resize {
+                width: Some(60_000),
+                height: None,
+                fit,
+            },
+            Limits::default(),
+        )
+        .expect_err("refuses");
+        assert_eq!(error.code(), "TOO_MANY_PIXELS", "{fit:?}");
+    }
+}
+
+#[test]
+fn refuses_a_derived_side_past_u32_instead_of_wrapping_it() {
+    let png = fixture(1, 4000, ImageFormat::Png);
+    let error = run(
+        &png,
+        Operation::Resize {
+            width: Some(u32::MAX),
+            height: None,
+            fit: Fit::Contain,
+        },
+        Limits::default(),
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "INVALID_GEOMETRY");
+}
+
+#[test]
+fn bounds_the_scaled_intermediate_of_a_cover_resize() {
+    // The box is 16 MP, under the ceiling; covering it from a 1x4000 strip
+    // first scales the strip to 4000 x 16 000 000.
+    let png = fixture(1, 4000, ImageFormat::Png);
+    let error = run(
+        &png,
+        Operation::Resize {
+            width: Some(4000),
+            height: Some(4000),
+            fit: Fit::Cover,
+        },
+        Limits::default(),
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn bounds_the_vertical_pass_of_a_resample() {
+    // The output is 20 000 pixels. The vertical pass in between is the
+    // source width by the target height: 5000 x 20000, in 32-bit floats.
+    let png = fixture(5000, 1, ImageFormat::Png);
+    let error = run(
+        &png,
+        Operation::Resize {
+            width: Some(1),
+            height: Some(20_000),
+            fit: Fit::Fill,
+        },
+        Limits {
+            max_pixels: 50_000_000,
+            ..Limits::default()
+        },
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn a_resize_exactly_at_the_ceiling_succeeds() {
+    let png = fixture(4, 4, ImageFormat::Png);
+    let limits = Limits {
+        max_pixels: 10_000,
+        ..Limits::default()
+    };
+    let out = run(
+        &png,
+        Operation::Resize {
+            width: Some(100),
+            height: Some(100),
+            fit: Fit::Fill,
+        },
+        limits,
+    )
+    .expect("at the ceiling is allowed");
+    let meta = inspect(&out, limits).expect("inspects");
+    assert_eq!((meta.width, meta.height), (100, 100));
+
+    let error = run(
+        &png,
+        Operation::Resize {
+            width: Some(100),
+            height: Some(101),
+            fit: Fit::Fill,
+        },
+        limits,
+    )
+    .expect_err("one row over is not");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn a_resize_inside_a_huge_box_that_changes_nothing_is_not_refused() {
+    // `inside` never enlarges: a box far over the ceiling around a small
+    // image allocates nothing, so there is nothing to refuse.
+    let png = fixture(40, 30, ImageFormat::Png);
+    let out = run(
+        &png,
+        Operation::Resize {
+            width: Some(100_000),
+            height: Some(100_000),
+            fit: Fit::Inside,
+        },
+        Limits::default(),
+    )
+    .expect("unchanged");
+    let meta = inspect(&out, Limits::default()).expect("inspects");
+    assert_eq!((meta.width, meta.height), (40, 30));
+}
+
+const FONT: &[u8] = include_bytes!("../../../tests/fixtures/VellumTestSans.ttf");
+
+fn watermark(text: String, size: f32) -> Operation {
+    Operation::WatermarkText {
+        text,
+        font: FONT.to_vec(),
+        size,
+        colour: Output::WHITE,
+        x: 0,
+        y: 0,
+    }
+}
+
+#[test]
+fn refuses_a_watermark_layer_over_the_pixel_ceiling() {
+    let png = fixture(4, 4, ImageFormat::Png);
+    let error =
+        run(&png, watermark("W".repeat(1000), 4096.0), Limits::default()).expect_err("refuses");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn refuses_a_watermark_text_over_the_length_limit() {
+    let png = fixture(4, 4, ImageFormat::Png);
+    let error = run(
+        &png,
+        watermark("W".repeat(20_000), 4096.0),
+        Limits::default(),
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "INVALID_GEOMETRY");
+    assert!(error.to_string().contains("1024"), "{error}");
+}
+
+#[test]
+fn a_watermark_at_the_length_limit_still_renders() {
+    let png = fixture(64, 64, ImageFormat::Png);
+    run(&png, watermark("i".repeat(1024), 8.0), Limits::default()).expect("renders");
+}

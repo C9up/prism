@@ -236,7 +236,9 @@ pub fn process(
 
     for operation in operations {
         image = match operation {
-            Operation::Resize { width, height, fit } => ops::resize(image, *width, *height, *fit)?,
+            Operation::Resize { width, height, fit } => {
+                ops::resize(image, *width, *height, *fit, limits.max_pixels)?
+            }
             Operation::Crop {
                 x,
                 y,
@@ -264,14 +266,14 @@ pub fn process(
                 x,
                 y,
             } => {
-                let layer = text::render(font, text, *size, *colour)?;
+                let layer = text::render(font, text, *size, *colour, limits.max_pixels)?;
                 ops::composite(image, &layer, *x, *y)
             }
             Operation::Thumbnail {
                 width,
                 height,
                 exact,
-            } => ops::thumbnail(image, *width, *height, *exact)?,
+            } => ops::thumbnail(image, *width, *height, *exact, limits.max_pixels)?,
             Operation::Blur(sigma) => ops::blur(image, *sigma)?,
             Operation::FastBlur(sigma) => ops::fast_blur(image, *sigma)?,
             Operation::Sharpen { sigma, threshold } => ops::sharpen(image, *sigma, *threshold)?,

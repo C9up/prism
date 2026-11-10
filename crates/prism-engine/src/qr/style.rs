@@ -999,6 +999,7 @@ fn build(text: &str, options: &QrOptions, embed_logo: bool) -> Result<Styled, En
             Some(MAX_LOGO_SIDE),
             Some(MAX_LOGO_SIDE),
             Fit::Inside,
+            Limits::default().max_pixels,
         )?;
         let png = encode(&embedded, ImageFormat::Png, 100, 8)?;
         let href = format!("data:image/png;base64,{}", base64(&png));
@@ -1070,7 +1071,13 @@ pub(super) fn image(
         let per_module = f64::from(side) / styled.total;
         let width = (logo.width * per_module).round().max(1.0) as u32;
         let height = (logo.height * per_module).round().max(1.0) as u32;
-        let resized = ops::resize(logo.image, Some(width), Some(height), Fit::Fill)?;
+        let resized = ops::resize(
+            logo.image,
+            Some(width),
+            Some(height),
+            Fit::Fill,
+            Limits::default().max_pixels,
+        )?;
         image = ops::composite(
             image,
             &resized,

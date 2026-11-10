@@ -78,13 +78,86 @@ fn target(
             // should be 200 tall, not 199. And at least 1, because a very
             // wide image scaled down otherwise computes a height of zero.
             let th = ((u64::from(tw) * u64::from(h) + u64::from(w) / 2) / u64::from(w)).max(1);
-            Ok((tw, th as u32))
+            Ok((tw, derived_side(th)?))
         }
         (None, Some(th)) => {
             let tw = ((u64::from(th) * u64::from(w) + u64::from(h) / 2) / u64::from(h)).max(1);
-            Ok((tw as u32, th))
+            Ok((derived_side(tw)?, th))
         }
     }
+}
+
+/// A derived side that does not fit a `u32` is refused, not truncated: `as`
+/// would wrap it to an arbitrary smaller number and resize to the wrong shape.
+fn derived_side(value: u64) -> Result<u32, EngineError> {
+    u32::try_from(value).map_err(|_| {
+        EngineError::Geometry(format!(
+            "keeping the aspect ratio makes the other side {value} pixels, which no image can be"
+        ))
+    })
+}
+
+/// The box an aspect-preserving resize lands in.
+///
+/// `image::math::resize_dimensions`, reproduced because it is crate-private
+/// and the size it computes has to be bounded BEFORE `image` allocates it.
+fn fitted(width: u32, height: u32, nwidth: u32, nheight: u32, fill: bool) -> (u32, u32) {
+    let wratio = f64::from(nwidth) / f64::from(width);
+    let hratio = f64::from(nheight) / f64::from(height);
+    let ratio = if fill {
+        wratio.max(hratio)
+    } else {
+        wratio.min(hratio)
+    };
+    let nw = ((f64::from(width) * ratio).round() as u64).max(1);
+    let nh = ((f64::from(height) * ratio).round() as u64).max(1);
+    if nw > u64::from(u32::MAX) {
+        let ratio = f64::from(u32::MAX) / f64::from(width);
+        (
+            u32::MAX,
+            ((f64::from(height) * ratio).round() as u32).max(1),
+        )
+    } else if nh > u64::from(u32::MAX) {
+        let ratio = f64::from(u32::MAX) / f64::from(height);
+        (((f64::from(width) * ratio).round() as u32).max(1), u32::MAX)
+    } else {
+        (nw as u32, nh as u32)
+    }
+}
+
+/// Refuse a buffer of `width` x `height` over the pixel ceiling.
+///
+/// Rust aborts the process when an allocation fails — that is not a panic,
+/// and no `catch_unwind` sees it — so an output whose size came from a request
+/// is bounded here, by the same ceiling the input is held to, before `image`
+/// asks for the memory.
+pub(crate) fn bound(width: u32, height: u32, max_pixels: u64) -> Result<(), EngineError> {
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > max_pixels {
+        return Err(EngineError::OutputTooLarge {
+            width,
+            height,
+            pixels,
+            limit: max_pixels,
+        });
+    }
+    Ok(())
+}
+
+/// Bound a Lanczos resample of `image` to `width` x `height`.
+///
+/// `imageops::resize` samples vertically first, into a 32-bit-float buffer of
+/// the SOURCE width by the TARGET height, so that intermediate is bounded too:
+/// a very wide source asked to become very tall builds it far larger than
+/// either end.
+fn bound_resample(
+    image: &DynamicImage,
+    width: u32,
+    height: u32,
+    max_pixels: u64,
+) -> Result<(), EngineError> {
+    bound(width, height, max_pixels)?;
+    bound(image.width(), height, max_pixels)
 }
 
 pub fn resize(
@@ -92,16 +165,33 @@ pub fn resize(
     width: Option<u32>,
     height: Option<u32>,
     fit: Fit,
+    max_pixels: u64,
 ) -> Result<DynamicImage, EngineError> {
     let (tw, th) = target(&image, width, height)?;
+    let (w, h) = (image.width(), image.height());
     Ok(match fit {
-        Fit::Fill => image.resize_exact(tw, th, FILTER),
-        Fit::Contain => image.resize(tw, th, FILTER),
-        Fit::Cover => image.resize_to_fill(tw, th, FILTER),
+        Fit::Fill => {
+            bound_resample(&image, tw, th, max_pixels)?;
+            image.resize_exact(tw, th, FILTER)
+        }
+        Fit::Contain => {
+            let (cw, ch) = fitted(w, h, tw, th, false);
+            bound_resample(&image, cw, ch, max_pixels)?;
+            image.resize(tw, th, FILTER)
+        }
+        Fit::Cover => {
+            // Scaled to cover the box first, then cropped: the scaled
+            // intermediate is the large one.
+            let (cw, ch) = fitted(w, h, tw, th, true);
+            bound_resample(&image, cw, ch, max_pixels)?;
+            image.resize_to_fill(tw, th, FILTER)
+        }
         Fit::Inside => {
-            if image.width() <= tw && image.height() <= th {
+            if w <= tw && h <= th {
                 image
             } else {
+                let (cw, ch) = fitted(w, h, tw, th, false);
+                bound_resample(&image, cw, ch, max_pixels)?;
                 image.resize(tw, th, FILTER)
             }
         }
@@ -270,11 +360,17 @@ pub fn thumbnail(
     width: Option<u32>,
     height: Option<u32>,
     exact: bool,
+    max_pixels: u64,
 ) -> Result<DynamicImage, EngineError> {
     let (tw, th) = target(&image, width, height)?;
+    // A box sampler writes straight into the output, so the output is the
+    // only buffer to bound.
     Ok(if exact {
+        bound(tw, th, max_pixels)?;
         image.thumbnail_exact(tw, th)
     } else {
+        let (cw, ch) = fitted(image.width(), image.height(), tw, th, false);
+        bound(cw, ch, max_pixels)?;
         image.thumbnail(tw, th)
     })
 }

@@ -66,6 +66,28 @@ function limitsOf(limits: Limits | undefined): JsLimits | undefined {
 }
 
 /**
+ * A pixel dimension, checked before it reaches the boundary.
+ *
+ * napi converts a JavaScript number to a `u32` modulo 2^32: `-1` arrives as
+ * 4294967295, `1e10` as some other number entirely, `NaN` as 0. A size that
+ * came from a query string has to be refused here, as written, rather than
+ * reach the engine as something nobody asked for.
+ */
+function dimension(
+	kind: string,
+	field: string,
+	value: number | undefined,
+): number | undefined {
+	if (value === undefined) return undefined;
+	if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+		throw new Error(
+			`INVALID_OPERATION: "${kind}".${field} must be a whole number of pixels between 0 and 4294967295, got ${value}`,
+		);
+	}
+	return value;
+}
+
+/**
  * Flatten one operation for the boundary.
  *
  * Exhaustive by construction: the `kind` switch returns from every arm, so a
@@ -77,8 +99,8 @@ function flatten(operation: Operation): JsOperation {
 		case "resize":
 			return {
 				kind: "resize",
-				width: operation.width,
-				height: operation.height,
+				width: dimension("resize", "width", operation.width),
+				height: dimension("resize", "height", operation.height),
 				fit: operation.fit,
 			};
 		case "crop":
@@ -86,8 +108,8 @@ function flatten(operation: Operation): JsOperation {
 				kind: "crop",
 				x: operation.x,
 				y: operation.y,
-				width: operation.width,
-				height: operation.height,
+				width: dimension("crop", "width", operation.width),
+				height: dimension("crop", "height", operation.height),
 			};
 		case "rotate":
 			return { kind: "rotate", degrees: operation.degrees };
@@ -114,8 +136,8 @@ function flatten(operation: Operation): JsOperation {
 		case "thumbnail":
 			return {
 				kind: "thumbnail",
-				width: operation.width,
-				height: operation.height,
+				width: dimension("thumbnail", "width", operation.width),
+				height: dimension("thumbnail", "height", operation.height),
 				exact: operation.exact,
 			};
 		case "blur":

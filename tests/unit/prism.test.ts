@@ -101,6 +101,67 @@ describe("guards", () => {
 		);
 	});
 
+	// What an operation BUILDS is held to the same ceiling as what it reads.
+	// A Rust allocation failure aborts the process — not a panic, nothing
+	// catches it — so each of these used to take the test runner down.
+	it("refuses a resize target over the pixel ceiling, and survives it", async () => {
+		const tiny = await fixture(4, 4);
+		await expect(
+			images
+				.edit(tiny)
+				.resize({ width: 100_000, height: 100_000, fit: "fill" })
+				.toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_TOO_MANY_PIXELS" });
+		await expect(
+			images
+				.edit(tiny)
+				.thumbnail({ width: 100_000, height: 100_000, exact: true })
+				.toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_TOO_MANY_PIXELS" });
+	});
+
+	it("bounds the side a resize derives from a width alone", async () => {
+		// `?w=` is all the endpoint passes. A 1x4000 strip asked for 60000
+		// wide would be 240 million pixels tall.
+		const strip = solidPng(0, 0, 0);
+		const tall = await images
+			.edit(strip)
+			.resize({ width: 1, height: 4000, fit: "fill" })
+			.toFormat("png");
+		await expect(
+			images
+				.edit(tall)
+				.resize({ width: 60_000, fit: "contain" })
+				.toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_TOO_MANY_PIXELS" });
+	});
+
+	it("refuses a watermark whose layer or text is unbounded", async () => {
+		const tiny = await fixture(4, 4);
+		await expect(
+			images
+				.edit(tiny)
+				.watermarkText({ text: "W".repeat(1000), font, size: 4096 })
+				.toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_TOO_MANY_PIXELS" });
+		await expect(
+			images
+				.edit(tiny)
+				.watermarkText({ text: "W".repeat(20_000), font, size: 4096 })
+				.toFormat("png"),
+		).rejects.toMatchObject({ code: "E_PRISM_INVALID_GEOMETRY" });
+	});
+
+	it("refuses a dimension napi would wrap rather than pass", async () => {
+		const tiny = await fixture(4, 4);
+		for (const width of [-1, 1e10, Number.NaN, Number.POSITIVE_INFINITY, 2.5]) {
+			await expect(
+				images.edit(tiny).resize({ width }).toFormat("png"),
+				String(width),
+			).rejects.toMatchObject({ code: "E_PRISM_INVALID_OPERATION" });
+		}
+	});
+
 	it("applies the limits to a pipeline too, not only to inspect", async () => {
 		const png = await fixture(64, 64);
 		const tight = new Prism({ limits: { maxPixels: 100 } });

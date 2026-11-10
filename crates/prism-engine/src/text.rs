@@ -22,6 +22,14 @@ use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
 use image::{DynamicImage, Rgba, RgbaImage};
 
 use crate::error::EngineError;
+use crate::ops;
+
+/// Longest watermark text accepted, in characters.
+///
+/// A watermark is a brand name or a copyright line. Every character becomes
+/// an outlined glyph held in memory before anything is drawn, so a text
+/// nobody bounded is memory nobody bounded.
+pub const MAX_TEXT_CHARS: usize = 1024;
 
 /// Straight-alpha RGBA, as a caller writes it.
 #[derive(Debug, Clone, Copy)]
@@ -42,9 +50,16 @@ pub fn render(
     text: &str,
     size: f32,
     colour: Colour,
+    max_pixels: u64,
 ) -> Result<DynamicImage, EngineError> {
     if text.is_empty() {
         return Err(EngineError::Geometry("the watermark text is empty".into()));
+    }
+    let length = text.chars().count();
+    if length > MAX_TEXT_CHARS {
+        return Err(EngineError::Geometry(format!(
+            "the watermark text is {length} characters, over the {MAX_TEXT_CHARS}-character limit"
+        )));
     }
     if !(1.0..=4096.0).contains(&size) {
         return Err(EngineError::Geometry(format!(
@@ -61,7 +76,7 @@ pub fn render(
     // widths. A script font's tail overhangs its advance, and a layer sized
     // by advances clips it.
     let mut pen = point(0.0, scaled.ascent());
-    let mut glyphs = Vec::with_capacity(text.chars().count());
+    let mut glyphs = Vec::with_capacity(length);
     let mut previous = None;
     for character in text.chars() {
         if character == '\n' {
@@ -100,8 +115,11 @@ pub fn render(
         max_x = max_x.max(bounds.max.x);
         max_y = max_y.max(bounds.max.y);
     }
+    // Saturating casts: a box past u32 is refused by the bound below rather
+    // than wrapped into a small one.
     let width = (max_x - min_x).ceil().max(1.0) as u32;
     let height = (max_y - min_y).ceil().max(1.0) as u32;
+    ops::bound(width, height, max_pixels)?;
 
     // Second pass: draw.
     let mut layer = RgbaImage::new(width, height);

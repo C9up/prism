@@ -18,6 +18,14 @@ pub enum EngineError {
         pixels: u64,
         limit: u64,
     },
+    /// An operation would build an image over the pixel ceiling — a resize
+    /// target, a watermark layer — which is refused before it is allocated.
+    OutputTooLarge {
+        width: u32,
+        height: u32,
+        pixels: u64,
+        limit: u64,
+    },
     ZeroDimension,
     UnknownFormat,
     UnsupportedFormat(String),
@@ -49,7 +57,7 @@ impl EngineError {
         match self {
             Self::Empty => "EMPTY_INPUT",
             Self::TooLarge { .. } => "INPUT_TOO_LARGE",
-            Self::TooManyPixels { .. } => "TOO_MANY_PIXELS",
+            Self::TooManyPixels { .. } | Self::OutputTooLarge { .. } => "TOO_MANY_PIXELS",
             Self::ZeroDimension => "ZERO_DIMENSION",
             Self::UnknownFormat => "UNKNOWN_FORMAT",
             Self::UnsupportedFormat(_) => "UNSUPPORTED_FORMAT",
@@ -76,6 +84,15 @@ impl fmt::Display for EngineError {
             Self::TooManyPixels { pixels, limit } => write!(
                 f,
                 "the image declares {pixels} pixels, over the {limit}-pixel limit"
+            ),
+            Self::OutputTooLarge {
+                width,
+                height,
+                pixels,
+                limit,
+            } => write!(
+                f,
+                "the operation would produce a {width}x{height} image, {pixels} pixels, over the {limit}-pixel limit"
             ),
             Self::ZeroDimension => write!(f, "the image declares a zero width or height"),
             Self::UnknownFormat => write!(f, "the bytes do not identify as any known image format"),
