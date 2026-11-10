@@ -305,6 +305,11 @@ async function resolveSource(
 	src: string,
 	roots: readonly string[],
 ): Promise<string | undefined> {
+	// `/photos/hero.png` is how a page names a public file, and Next's image
+	// optimizer takes it as such: one leading slash is read as "under the
+	// roots". Exactly one — `//host/a.png` is a protocol-relative URL, and
+	// stays refused as one.
+	if (src.startsWith("/") && !src.startsWith("//")) src = src.slice(1);
 	// A NUL truncates the path in some syscalls, so the name checked is not
 	// the name opened.
 	if (src.length === 0 || src.includes("\0")) return undefined;

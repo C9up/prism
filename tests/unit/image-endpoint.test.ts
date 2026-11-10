@@ -146,6 +146,42 @@ describe("the contract with the component", () => {
 		]);
 	});
 
+	it("serves the src @c9up/nebula sends for a root-relative path", async () => {
+		// Locked as a literal on both sides, like the widths: nebula's default
+		// resolver turns `/photos/hero.png` into exactly this URL, and its
+		// `tests/unit/image.test.ts` locks the same string.
+		const { dir } = await root();
+		await mkdir(join(dir, "photos"));
+		await writeFile(join(dir, "photos", "hero.png"), detailedPng(800, 600));
+		const request = mount({ roots: [dir] });
+		const url = new URL("/__image?src=photos%2Fhero.png&w=640", "http://x");
+		const answer = await request(Object.fromEntries(url.searchParams));
+		expect(answer.status).toBe(200);
+		expect(images.inspect(answer.body ?? Buffer.alloc(0)).width).toBe(640);
+	});
+
+	it("reads one leading slash as the root, as Next's image optimizer does", async () => {
+		const { dir } = await root();
+		await mkdir(join(dir, "photos"));
+		await writeFile(join(dir, "photos", "hero.png"), detailedPng(80, 60));
+		const request = mount({ roots: [dir], widths: [64] });
+		expect((await request({ src: "/photos/hero.png", w: "64" })).status).toBe(
+			200,
+		);
+		// Never more than one: a protocol-relative URL, or a slash that
+		// re-opens an absolute path, is still refused.
+		for (const src of [
+			"//photos/hero.png",
+			"//example.com/a.png",
+			"///etc/passwd",
+			"/",
+			"/../photo.png",
+			"/%2e%2e/photo.png",
+		]) {
+			expect((await request({ src, w: "64" })).status, src).toBe(404);
+		}
+	});
+
 	it("serves a width a constrained 1200px image would ask for", async () => {
 		// The case that made this list what it is: 1200 and 2400 are not rungs,
 		// so the component rounds up to 1280 and 2560 — and those must be here.
