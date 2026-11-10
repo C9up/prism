@@ -4,10 +4,16 @@
 //! it touches a few hundred bytes, and `process` hands the whole pipeline to
 //! a libuv worker because decoding, resampling and re-encoding a photograph
 //! is tens of milliseconds that must not sit on the event loop.
+//!
+//! Beside the engine, `openedPath` names the file behind a descriptor on the
+//! systems where only native code can ask: the image endpoint confines what
+//! it opened, not what it named.
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+mod opened;
 
 use prism_engine::{
     error::EngineError, guard, ops::Fit, Colour, Limits, Metadata, Operation, Output,
@@ -631,4 +637,12 @@ pub fn qr_swiss_matrix(payload: String) -> Result<JsQrMatrix> {
                 .collect::<Vec<u8>>(),
         ),
     })
+}
+
+/// The path of the file behind an open descriptor, as the system names it
+/// now, or null where it cannot be asked from here (Linux reads procfs
+/// itself). Synchronous: one system call, on a descriptor the caller holds.
+#[napi]
+pub fn opened_path(fd: i32) -> Option<String> {
+    opened::path_of(fd)
 }

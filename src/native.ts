@@ -33,6 +33,7 @@ import {
  */
 const NATIVE_CALLS = [
 	"inspect",
+	"openedPath",
 	"process",
 	"qrImage",
 	"qrSvg",
@@ -294,4 +295,13 @@ export function qrSwissMatrixNative(payload: string): {
 	} catch (error) {
 		throw fromEngine(error);
 	}
+}
+
+/**
+ * The path of the file behind an open descriptor, as the system names it now,
+ * or `undefined` where native code cannot ask (Linux answers through procfs,
+ * which the caller reads). Never a guess: an unknown is `undefined`.
+ */
+export function openedPathNative(fd: number): string | undefined {
+	return engine().openedPath(fd) ?? undefined;
 }

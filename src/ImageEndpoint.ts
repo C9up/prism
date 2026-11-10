@@ -60,6 +60,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 import { PrismError } from "./errors.js";
+import { openedPathNative } from "./native.js";
 import type { Prism } from "./Prism.js";
 import type { ImageFormat, ImageServingConfig } from "./types.js";
 
@@ -372,9 +373,12 @@ interface OpenedSource {
  *
  * Asked of the handle, not of the name: a directory above the file swapped
  * for a link after `realpath` is walked through by `open` whatever its flags.
- * Linux names the file an open descriptor refers to in `/proc/self/fd`, which
- * settles it. Without procfs, the path is resolved again and must still be
- * the checked one and the same inode as the handle.
+ * Linux names the file an open descriptor refers to in `/proc/self/fd`;
+ * macOS and Windows name it through the engine (`F_GETPATH`, the handle's
+ * final path). Either settles it, and a file moved after the open is judged
+ * where it is now. Where neither can answer, the path is resolved again and
+ * must still be the checked one and the same inode as the handle — which
+ * refuses a source whose path changed at all, rather than guess.
  */
 async function openedWithin(
 	handle: FileHandle,
@@ -382,12 +386,7 @@ async function openedWithin(
 	candidate: string,
 	real: string,
 ): Promise<boolean> {
-	let located: string | undefined;
-	try {
-		located = await readlink(`/proc/self/fd/${handle.fd}`);
-	} catch {
-		located = undefined;
-	}
+	const located = (await procfsPath(handle)) ?? openedPathNative(handle.fd);
 	if (located !== undefined) return within(realRoot, located);
 	const again = await realpath(candidate);
 	if (again !== real) return false;
@@ -396,6 +395,22 @@ async function openedWithin(
 		handle.stat({ bigint: true }),
 	]);
 	return now.dev === opened.dev && now.ino === opened.ino;
+}
+
+/**
+ * What `/proc/self/fd` names the handle, or `undefined` without procfs.
+ *
+ * Linux only. Elsewhere `/proc` is an ordinary path, and on Windows
+ * `C:\proc\self\fd\3` is a folder any local account may create and fill
+ * with a junction answering whatever it likes.
+ */
+async function procfsPath(handle: FileHandle): Promise<string | undefined> {
+	if (process.platform !== "linux") return undefined;
+	try {
+		return await readlink(`/proc/self/fd/${handle.fd}`);
+	} catch {
+		return undefined;
+	}
 }
 
 /**

@@ -12,7 +12,9 @@ import {
 	lstat,
 	mkdir,
 	mkdtemp,
+	open,
 	readdir,
+	realpath,
 	rename,
 	rm,
 	stat,
@@ -28,6 +30,7 @@ import {
 	type ImageHttpContext,
 	registerImageRoute,
 } from "../../src/ImageEndpoint.js";
+import { openedPathNative } from "../../src/native.js";
 import { Pipeline, Prism } from "../../src/Prism.js";
 import type {
 	ImageServingConfig,
@@ -44,7 +47,7 @@ const fsHooks = vi.hoisted(() => {
 	const hooks: {
 		afterRealpath?: (real: string) => Promise<void>;
 		afterOpen?: (path: string) => Promise<void>;
-		/** Answer like a system without procfs (macOS, Windows). */
+		/** Answer like a system without procfs. */
 		noProcfs?: boolean;
 	} = {};
 	return hooks;
@@ -437,15 +440,18 @@ describe("what the endpoint refuses", () => {
 	});
 
 	it("renders the file it checked even when the path changes after it is opened", async () => {
-		// Once open, the endpoint reads from that handle: replacing the file
-		// at the path no longer changes what is rendered.
+		// Once open, the endpoint reads from that handle: moving the file
+		// aside and pointing its path outside no longer changes what is
+		// rendered. Moved, not deleted: a deleted file has no name left in the
+		// root on every system (Windows parks it under `$Extend\$Deleted`),
+		// and an unnamed file is refused.
 		const outside = await root();
 		await writeFile(join(outside.dir, "small.png"), detailedPng(300, 200));
 		const { dir } = await root();
 		fsHooks.afterOpen = async (path) => {
 			if (!path.endsWith("photo.png")) return;
 			fsHooks.afterOpen = undefined;
-			await rm(path);
+			await rename(path, join(dir, "photo-before.png"));
 			await symlink(join(outside.dir, "small.png"), path);
 		};
 		const request = mount({ roots: [dir], widths: [400] });
@@ -454,6 +460,25 @@ describe("what the endpoint refuses", () => {
 		expect(answer.status).toBe(200);
 		if (answer.body === undefined) throw new Error("no body");
 		expect(images.inspect(answer.body).width).toBe(400);
+	});
+
+	it("names an open file by its handle where the engine can ask", async () => {
+		// The answer the confinement check relies on without procfs: where
+		// the file is NOW, not where it was opened from.
+		const { dir } = await root();
+		const handle = await open(join(dir, "photo.png"), "r");
+		try {
+			await rename(join(dir, "photo.png"), join(dir, "moved.png"));
+			const located = openedPathNative(handle.fd);
+			if (process.platform === "darwin" || process.platform === "win32") {
+				expect(located).toBe(await realpath(join(dir, "moved.png")));
+			} else {
+				// Linux is asked through procfs by the endpoint itself.
+				expect(located).toBeUndefined();
+			}
+		} finally {
+			await handle.close();
+		}
 	});
 
 	it("accepts a root that is itself a symbolic link", async () => {

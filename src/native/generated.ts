@@ -225,3 +225,11 @@ export declare function qrImage(
  */
 
 export declare function qrSwissMatrix(payload: string): JsQrMatrix;
+
+/**
+ * The path of the file behind an open descriptor, as the system names it
+ * now, or null where it cannot be asked from here (Linux reads procfs
+ * itself). Synchronous: one system call, on a descriptor the caller holds.
+ */
+
+export declare function openedPath(fd: number): string | null;
