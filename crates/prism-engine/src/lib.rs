@@ -8,6 +8,7 @@
 //! three steps is deliberate and load-bearing: identify the format from the
 //! content, bound the dimensions from the header, and only then allocate.
 
+pub mod avif;
 pub mod colour;
 pub mod encode;
 pub mod error;
@@ -176,7 +177,12 @@ pub(crate) fn decode(
 ) -> Result<DynamicImage, EngineError> {
     // Probe FIRST. `load_from_memory` would happily allocate the fifty
     // thousand square pixels a four-kilobyte file can declare.
-    guard::probe(bytes, limits)?;
+    let probe = guard::probe(bytes, limits)?;
+    if probe.format == ImageFormat::Avif {
+        // The probe bounded what the sequence headers declare; a frame header
+        // can still override it, and `image` gives dav1d no limit.
+        avif::preflight(bytes, limits.max_pixels)?;
+    }
     let image =
         image::load_from_memory(bytes).map_err(|error| EngineError::Decode(error.to_string()))?;
     if !auto_orient {

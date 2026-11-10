@@ -55,6 +55,13 @@ qrcode = { version = "0.14.1", default-features = false }
 # path and composited after.
 resvg = { version = "0.48.1", default-features = false }
 
+# Bounding an AVIF without `image`, whose AVIF decoder decodes the whole
+# frame in its constructor and gives `dav1d` no frame-size limit (see
+# `avif.rs`). Both are what `avif-native` already pulls in, at the same
+# versions, so nothing new is built.
+mp4parse = "0.17.0"
+dav1d = "0.11.1"
+
 [dev-dependencies]
 # Reading a generated QR code back: the proof that it scans. rxing is ZXing,
 # the decoder most phone scanners are built on; rqrr was tried first and

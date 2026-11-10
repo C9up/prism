@@ -162,6 +162,26 @@ describe("guards", () => {
 		}
 	});
 
+	it("refuses an AVIF bomb from its headers, without decoding it on the event loop", async () => {
+		// 1683 bytes declaring 16000x16000. `inspect` is synchronous: it used
+		// to decode the frame to learn its size — a gigabyte and a third of
+		// a second with the event loop stopped, before the ceiling said no.
+		const bomb = readFileSync(
+			join(here, "../fixtures/declares-16000x16000.avif"),
+		);
+		const avif = new Prism({ limits: { allowedFormats: ["avif"] } });
+		const rss = process.memoryUsage().rss;
+		const started = performance.now();
+		const error = catchError(() => avif.inspect(bomb));
+		const elapsed = performance.now() - started;
+		expect(error?.code).toBe("E_PRISM_TOO_MANY_PIXELS");
+		expect(elapsed).toBeLessThan(20);
+		expect(process.memoryUsage().rss - rss).toBeLessThan(64 * 1024 * 1024);
+		await expect(avif.edit(bomb).toFormat("png")).rejects.toMatchObject({
+			code: "E_PRISM_TOO_MANY_PIXELS",
+		});
+	});
+
 	it("applies the limits to a pipeline too, not only to inspect", async () => {
 		const png = await fixture(64, 64);
 		const tight = new Prism({ limits: { maxPixels: 100 } });

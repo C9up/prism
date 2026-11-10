@@ -1056,3 +1056,74 @@ fn a_watermark_at_the_length_limit_still_renders() {
     let png = fixture(64, 64, ImageFormat::Png);
     run(&png, watermark("i".repeat(1024), 8.0), Limits::default()).expect("renders");
 }
+
+// ─── AVIF ───────────────────────────────────────────────────────────
+
+const AVIF_BOMB: &[u8] = include_bytes!("../../../tests/fixtures/declares-16000x16000.avif");
+
+fn avif_limits() -> Limits {
+    Limits {
+        allowed: guard::FormatSet::from_names(["avif"]).expect("known"),
+        ..Limits::default()
+    }
+}
+
+#[test]
+fn refuses_an_avif_bomb_from_its_headers_without_decoding_it() {
+    // `image` decodes the whole frame to report an AVIF's size: 256 MP here,
+    // a gigabyte, before the ceiling was consulted.
+    let started = std::time::Instant::now();
+    let error = inspect(AVIF_BOMB, avif_limits()).expect_err("refuses");
+    let elapsed = started.elapsed();
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+    assert!(error.to_string().contains("256000000"), "{error}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(50),
+        "a header read, not a decode: {elapsed:?}"
+    );
+
+    let error = process(
+        AVIF_BOMB,
+        &[],
+        &output(ImageFormat::Png),
+        avif_limits(),
+        true,
+    )
+    .expect_err("refuses");
+    assert_eq!(error.code(), "TOO_MANY_PIXELS");
+}
+
+#[test]
+fn reads_and_decodes_an_avif_within_the_ceiling() {
+    let avif = fixture(48, 32, ImageFormat::Avif);
+    let meta = inspect(&avif, avif_limits()).expect("inspects");
+    assert_eq!(
+        (meta.width, meta.height, meta.format.as_str()),
+        (48, 32, "avif")
+    );
+    let png = process(&avif, &[], &output(ImageFormat::Png), avif_limits(), true).expect("decodes");
+    let meta = inspect(&png, Limits::default()).expect("inspects");
+    assert_eq!((meta.width, meta.height), (48, 32));
+}
+
+#[test]
+fn refuses_an_avif_just_over_the_ceiling() {
+    let avif = fixture(48, 32, ImageFormat::Avif);
+    let limits = Limits {
+        max_pixels: 48 * 32 - 1,
+        ..avif_limits()
+    };
+    assert_eq!(
+        inspect(&avif, limits).expect_err("refuses").code(),
+        "TOO_MANY_PIXELS"
+    );
+}
+
+#[test]
+fn an_avif_that_is_not_one_is_unreadable_not_a_panic() {
+    let mut avif = fixture(16, 16, ImageFormat::Avif);
+    let length = avif.len();
+    avif.truncate(length / 2);
+    let error = inspect(&avif, avif_limits()).expect_err("refuses");
+    assert_eq!(error.code(), "UNREADABLE");
+}

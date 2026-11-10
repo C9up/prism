@@ -18,3 +18,13 @@ already carries, which is kept unchanged here.
 
 It is a test fixture. It is not shipped with the package (`files` does not
 include `tests`) and nothing at runtime reads it.
+
+## `declares-16000x16000.avif`
+
+1683 bytes that declare a 16000x16000 frame: a flat grey picture encoded by
+ffmpeg with libaom (`-f lavfi -i color=c=gray:s=16000x16000 -frames:v 1
+-c:v libaom-av1 -still-picture 1 -crf 63`). The decompression bomb in its
+AVIF form, and checked in because nothing in this package encodes a 256 MP
+AV1 frame in a test's time budget. A probe must refuse it from its headers;
+before it did, `inspect` decoded it — a gigabyte and a third of a second on
+the event loop.

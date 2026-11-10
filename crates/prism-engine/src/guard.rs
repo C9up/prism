@@ -185,14 +185,21 @@ pub fn probe(bytes: &[u8], limits: Limits) -> Result<Probe, EngineError> {
         });
     }
 
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|error| EngineError::Unreadable(error.to_string()))?;
-
     // Multiplied in u64: two u32 dimensions overflow a u32 long before they
     // reach a limit, and an overflowed product compares as a small number —
     // which is precisely the check passing for the largest possible image.
-    let pixels = u64::from(width) * u64::from(height);
+    let (width, height, pixels) = if format == ImageFormat::Avif {
+        // NOT `into_dimensions`: `image`'s AVIF decoder decodes the whole
+        // frame to answer it. The sequence headers say the same thing for
+        // a few hundred bits — see `avif.rs`.
+        let declared = crate::avif::declared(bytes)?;
+        (declared.width, declared.height, declared.max_pixels)
+    } else {
+        let (width, height) = reader
+            .into_dimensions()
+            .map_err(|error| EngineError::Unreadable(error.to_string()))?;
+        (width, height, u64::from(width) * u64::from(height))
+    };
     if pixels > limits.max_pixels {
         return Err(EngineError::TooManyPixels {
             pixels,

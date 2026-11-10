@@ -1239,8 +1239,10 @@ name = "prism-engine"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "dav1d",
  "image",
  "kamadak-exif",
+ "mp4parse",
  "qrcode",
  "resvg",
  "rxing",
