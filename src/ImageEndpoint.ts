@@ -43,7 +43,14 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	readFile,
+	realpath,
+	rename,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 import { PrismError } from "./errors.js";
 import type { Prism } from "./Prism.js";
@@ -273,15 +280,23 @@ function queryParam(request: ImageRequest, name: string): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+/** Is `path` the directory `root` or inside it? Both already resolved. */
+function within(root: string, path: string): boolean {
+	return path === root || path.startsWith(root + sep);
+}
+
 /**
  * The file a `src` names, or `undefined` when it names nothing reachable.
  *
- * Two independent checks, because each catches what the other misses. The
- * literal one rejects the obvious traversal before any filesystem call; the
- * prefix check on the resolved path is what actually holds, and catches the
- * encodings nobody thought of. A `src` reaching outside is not an error worth
- * distinguishing from a missing file — telling them apart is how a caller maps
- * the disk.
+ * Three checks, because each catches what the others miss. The literal one
+ * rejects the obvious traversal before any filesystem call; the prefix check
+ * on the resolved path catches the encodings nobody thought of; and the same
+ * check on the REAL path catches a symbolic link — planted by an archive
+ * extracted into an upload directory, a shared volume, a careless deploy —
+ * that is inside a root by name and anywhere on the disk by target. The file
+ * returned is the real path that was checked, so what is read is what was
+ * confined. A `src` reaching outside is not an error worth distinguishing from
+ * a missing file — telling them apart is how a caller maps the disk.
  */
 async function resolveSource(
 	src: string,
@@ -296,10 +311,17 @@ async function resolveSource(
 
 	for (const root of roots) {
 		const candidate = resolvePath(join(root, src));
-		if (candidate !== root && !candidate.startsWith(root + sep)) continue;
+		if (!within(root, candidate)) continue;
 		try {
-			const info = await stat(candidate);
-			if (info.isFile()) return candidate;
+			// The root's own real path too: a root that is itself a link
+			// (a release directory, a mounted volume) is legitimate.
+			const [realRoot, real] = await Promise.all([
+				realpath(root),
+				realpath(candidate),
+			]);
+			if (!within(realRoot, real)) continue;
+			const info = await stat(real);
+			if (info.isFile()) return real;
 		} catch {
 			// Not in this root; try the next.
 		}

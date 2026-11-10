@@ -8,7 +8,15 @@
  * feature.
  */
 
-import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	rm,
+	stat,
+	symlink,
+	utimes,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -251,6 +259,51 @@ describe("what the endpoint refuses", () => {
 		expect((await request({ src: ".", w: "400" })).status).toBe(404);
 		expect((await request({ src: "", w: "400" })).status).toBe(404);
 		expect((await request({ w: "400" })).status).toBe(400);
+	});
+
+	it("refuses a symbolic link in a root that points outside it", async () => {
+		const outside = await root();
+		const secret = join(outside.dir, "secret.txt");
+		await writeFile(secret, "outside-root secret\n");
+		const { dir } = await root();
+		await symlink(secret, join(dir, "avatar.png"));
+		await symlink(join(outside.dir, "photo.png"), join(dir, "elsewhere.png"));
+		await symlink(outside.dir, join(dir, "linked-dir"));
+		const request = mount({ roots: [dir], widths: [400] });
+		for (const src of ["avatar.png", "elsewhere.png", "linked-dir/photo.png"]) {
+			const answer = await request({ src, w: "400", f: "webp" });
+			expect(answer.status, src).toBe(404);
+			expect(answer.body, src).toBeUndefined();
+		}
+		const missing = await request({ src: "nope.png", w: "400" });
+		expect((await request({ src: "avatar.png", w: "400" })).json).toEqual(
+			missing.json,
+		);
+	});
+
+	it("follows a symbolic link that stays inside the root", async () => {
+		const { dir } = await root();
+		await mkdir(join(dir, "aliases"));
+		await symlink(join(dir, "photo.png"), join(dir, "aliases", "hero.png"));
+		const request = mount({ roots: [dir], widths: [400] });
+		const answer = await request({
+			src: "aliases/hero.png",
+			w: "400",
+			f: "webp",
+		});
+		expect(answer.status).toBe(200);
+	});
+
+	it("accepts a root that is itself a symbolic link", async () => {
+		const { dir } = await root();
+		const parent = await mkdtemp(join(tmpdir(), "prism-linked-root-"));
+		temporary.push(parent);
+		const linked = join(parent, "current");
+		await symlink(dir, linked);
+		const request = mount({ roots: [linked], widths: [400] });
+		expect(
+			(await request({ src: "photo.png", w: "400", f: "webp" })).status,
+		).toBe(200);
 	});
 
 	it("serves nothing at all when no root is configured", async () => {
