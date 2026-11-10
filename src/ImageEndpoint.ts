@@ -17,7 +17,8 @@
  * - `q` must be one of the configured qualities.
  *
  * That leaves the number of distinct answers at (files × widths × formats ×
- * qualities), which is a number the operator chose. A request outside the
+ * qualities), which is a number the operator chose — per version of each
+ * file, and the disk cache keeps only the current version's. A request outside the
  * lists is a 400 and is never decoded — refusing before the work is the whole
  * point.
  *
@@ -45,10 +46,12 @@
 import { createHash } from "node:crypto";
 import {
 	mkdir,
+	readdir,
 	readFile,
 	realpath,
 	rename,
 	stat,
+	unlink,
 	writeFile,
 } from "node:fs/promises";
 import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
@@ -399,34 +402,86 @@ async function describe(
  */
 const inFlight = new Map<string, Promise<Buffer>>();
 
-async function readCached(
+/**
+ * Where a variant lives on disk.
+ *
+ * One directory per source, and every file in it named after the source
+ * VERSION it was rendered from. The key already changes when the file behind
+ * a URL changes; what this layout adds is that the previous version's
+ * variants can be found, and are deleted when the new one is written — an
+ * avatar re-uploaded at the same path otherwise leaves every variant of
+ * every past upload on disk, forever.
+ */
+interface DiskSlot {
+	directory: string;
+	version: string;
+	file: string;
+}
+
+function hash(parts: readonly (string | number)[], length: number): string {
+	return createHash("sha256")
+		.update(parts.join("\u0000"))
+		.digest("hex")
+		.slice(0, length);
+}
+
+function diskSlot(
 	cacheDir: string | undefined,
+	source: { path: string; size: number; mtimeMs: number },
 	key: string,
-): Promise<Buffer | undefined> {
+): DiskSlot | undefined {
 	if (cacheDir === undefined) return undefined;
+	const directory = join(cacheDir, hash([source.path], 32));
+	const version = hash([source.size, source.mtimeMs], 16);
+	return { directory, version, file: join(directory, `${version}-${key}`) };
+}
+
+async function readCached(
+	slot: DiskSlot | undefined,
+): Promise<Buffer | undefined> {
+	if (slot === undefined) return undefined;
 	try {
-		return await readFile(join(cacheDir, key));
+		return await readFile(slot.file);
 	} catch {
 		return undefined;
 	}
 }
 
 async function writeCached(
-	cacheDir: string | undefined,
-	key: string,
+	slot: DiskSlot | undefined,
 	bytes: Buffer,
 ): Promise<void> {
-	if (cacheDir === undefined) return;
+	if (slot === undefined) return;
+	// Write then rename: a reader that opens the file mid-write otherwise
+	// gets a truncated image, and a truncated image is cached forever.
+	const temporary = `${slot.file}.${process.pid}.tmp`;
 	try {
-		await mkdir(cacheDir, { recursive: true });
-		// Write then rename: a reader that opens the file mid-write otherwise
-		// gets a truncated image, and a truncated image is cached forever.
-		const temporary = join(cacheDir, `${key}.${process.pid}.tmp`);
+		await mkdir(slot.directory, { recursive: true });
 		await writeFile(temporary, bytes);
-		await rename(temporary, join(cacheDir, key));
+		await rename(temporary, slot.file);
 	} catch {
-		// A cache that cannot be written is slow, not broken.
+		// A cache that cannot be written is slow, not broken — but it must
+		// not keep the half it did write.
+		await unlink(temporary).catch(() => undefined);
+		return;
 	}
+	await pruneVersions(slot);
+}
+
+/** Delete what an earlier version of the source left in its directory. */
+async function pruneVersions(slot: DiskSlot): Promise<void> {
+	let entries: string[];
+	try {
+		entries = await readdir(slot.directory);
+	} catch {
+		return;
+	}
+	const current = `${slot.version}-`;
+	await Promise.all(
+		entries
+			.filter((name) => !name.startsWith(current))
+			.map((name) => unlink(join(slot.directory, name)).catch(() => undefined)),
+	);
 }
 
 /**
@@ -633,7 +688,12 @@ export function registerImageRoute(
 		}
 
 		const target = output;
-		let bytes = memory?.get(key) ?? (await readCached(settings.cacheDir, key));
+		const onDisk = diskSlot(
+			settings.cacheDir,
+			{ path: file, size: info.size, mtimeMs: info.mtimeMs },
+			key,
+		);
+		let bytes = memory?.get(key) ?? (await readCached(onDisk));
 		if (bytes === undefined) {
 			let work = inFlight.get(key);
 			if (work === undefined) {
@@ -659,7 +719,7 @@ export function registerImageRoute(
 							settings.effort,
 						);
 						memory?.set(key, rendered);
-						await writeCached(settings.cacheDir, key, rendered);
+						await writeCached(onDisk, rendered);
 						return rendered;
 					} finally {
 						release();

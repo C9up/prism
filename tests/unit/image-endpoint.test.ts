@@ -11,6 +11,7 @@
 import {
 	mkdir,
 	mkdtemp,
+	readdir,
 	rm,
 	stat,
 	symlink,
@@ -18,7 +19,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	DEFAULT_WIDTHS,
@@ -694,11 +695,66 @@ describe("caching", () => {
 		const cacheDir = join(dir, ".cache");
 		const request = mount({ roots: [dir], widths: [400], cacheDir });
 		await request({ src: "photo.png", w: "400", f: "webp" });
-		const { readdir } = await import("node:fs/promises");
-		const entries = await readdir(cacheDir);
-		expect(entries.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+		const files = await cached(cacheDir);
+		expect(files).toHaveLength(1);
+		expect(files.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("keeps one version of a source's variants, however often it is replaced", async () => {
+		// The common layout: an avatar re-uploaded at the same path. Every
+		// upload used to add its variants to the cache, and none ever left.
+		const { dir } = await root();
+		const cacheDir = join(dir, ".cache");
+		const widths = [64, 128, 256, 384];
+		const request = mount({ roots: [dir], widths, cacheDir });
+		for (let upload = 1; upload <= 5; upload++) {
+			await writeFile(join(dir, "photo.png"), detailedPng(400 + upload, 300));
+			const when = new Date(Date.now() + upload * 10_000);
+			await utimes(join(dir, "photo.png"), when, when);
+			for (const w of widths) {
+				const answer = await request({
+					src: "photo.png",
+					w: String(w),
+					f: "webp",
+				});
+				expect(answer.status).toBe(200);
+			}
+			expect(await cached(cacheDir), `upload ${upload}`).toHaveLength(4);
+		}
+	});
+
+	it("removes the temporary file when the rename fails", async () => {
+		const { dir } = await root();
+		const cacheDir = join(dir, ".cache");
+		const request = mount({ roots: [dir], widths: [400], cacheDir });
+		await request({ src: "photo.png", w: "400", f: "webp" });
+		const [variant] = await cached(cacheDir);
+		if (variant === undefined) throw new Error("nothing was cached");
+		// A non-empty directory where the variant goes: the rename onto it
+		// fails, after the temporary file was written.
+		await rm(join(cacheDir, variant));
+		await mkdir(join(cacheDir, variant));
+		await writeFile(join(cacheDir, variant, "occupied"), "x");
+
+		const again = await request({ src: "photo.png", w: "400", f: "webp" });
+		expect(again.status).toBe(200);
+		expect(
+			(await cached(cacheDir)).filter((name) => name.endsWith(".tmp")),
+		).toEqual([]);
 	});
 });
+
+/** Every file under a cache directory, relative to it. */
+async function cached(cacheDir: string): Promise<string[]> {
+	const entries = await readdir(cacheDir, {
+		recursive: true,
+		withFileTypes: true,
+	});
+	return entries
+		.filter((entry) => entry.isFile())
+		.map((entry) => relative(cacheDir, join(entry.parentPath, entry.name)))
+		.filter((name) => !name.includes("occupied"));
+}
 
 /** A small JPEG, encoded by the engine so it is a real one. */
 function encodeJpeg(): Promise<Buffer> {
