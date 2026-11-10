@@ -19,20 +19,37 @@ import type {
 } from "./native/generated.js";
 import type { Limits, Metadata, Operation, OutputOptions } from "./types.js";
 import {
+	hasFunctions,
 	loadNativeBinary,
 	unavailableReason as vendorUnavailableReason,
 } from "./vendor/nativeBinary.js";
 
 /**
- * The engine's surface, as the Rust declares it.
+ * What this package calls on the engine, typed as the Rust declares it.
  *
  * Derived from the generated file — written by `pnpm build:napi-types` from
  * napi-derive's own `type-def` output — rather than restated here, where
  * nothing would notice a `pub fn` changing its signature.
  */
-type NativePrism = typeof import("./native/generated.js");
+const NATIVE_CALLS = [
+	"inspect",
+	"process",
+	"qrImage",
+	"qrSvg",
+	"qrSwissMatrix",
+] as const;
 
-const attempt = loadNativeBinary<NativePrism>();
+type NativePrism = Pick<
+	typeof import("./native/generated.js"),
+	(typeof NATIVE_CALLS)[number]
+>;
+
+/** What the package calls, checked at load: a stale binary loads just as well. */
+function isNativePrism(value: unknown): value is NativePrism {
+	return hasFunctions(value, NATIVE_CALLS);
+}
+
+const attempt = loadNativeBinary(isNativePrism);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
