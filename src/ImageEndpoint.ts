@@ -27,12 +27,16 @@
  *
  * What comes back carries no EXIF. The engine re-encodes from decoded pixels
  * and metadata does not survive that, which is what keeps a holiday photo's
- * GPS coordinates out of a public thumbnail.
+ * GPS coordinates out of a public thumbnail. That only holds if nothing but a
+ * re-encode ever leaves: a source the engine cannot render — an SVG, a photo
+ * over the pixel ceiling, a `.env` that happens to sit in a root — is refused,
+ * never passed through as it is.
  */
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
+import { PrismError } from "./errors.js";
 import type { Prism } from "./Prism.js";
 import type { ImageFormat, ImageServingConfig } from "./types.js";
 
@@ -79,9 +83,16 @@ interface ResolvedConfig {
 	quality: number;
 	cacheDir: string | undefined;
 	maxAge: number;
+	maxBytes: number;
 }
 
-function resolveConfig(config: ImageServingConfig): ResolvedConfig {
+/** The engine's own default for `limits.maxBytes`. */
+const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+
+function resolveConfig(
+	config: ImageServingConfig,
+	images: Prism,
+): ResolvedConfig {
 	const quality = config.quality ?? 82;
 	return {
 		path: config.path ?? "/__image",
@@ -93,6 +104,7 @@ function resolveConfig(config: ImageServingConfig): ResolvedConfig {
 		quality,
 		cacheDir: config.cacheDir,
 		maxAge: config.maxAge ?? 31_536_000,
+		maxBytes: images.config().limits?.maxBytes ?? DEFAULT_MAX_BYTES,
 	};
 }
 
@@ -186,7 +198,7 @@ function variantKey(input: {
 	size: number;
 	mtimeMs: number;
 	width: number;
-	format: ImageFormat | undefined;
+	format: ImageFormat;
 	quality: number;
 }): string {
 	return createHash("sha256")
@@ -196,12 +208,39 @@ function variantKey(input: {
 				input.size,
 				input.mtimeMs,
 				input.width,
-				input.format ?? "source",
+				input.format,
 				input.quality,
 			].join("\u0000"),
 		)
 		.digest("hex")
 		.slice(0, 32);
+}
+
+/**
+ * What each source version is, so a source is read and identified once per
+ * version rather than once per request. Bounded: one entry per file version,
+ * the oldest dropped first.
+ */
+const described = new Map<string, SourceInfo>();
+const DESCRIBED_ENTRIES = 1024;
+
+async function describe(
+	images: Prism,
+	file: string,
+	info: { size: number; mtimeMs: number },
+): Promise<SourceInfo> {
+	const id = [file, info.size, info.mtimeMs].join("\u0000");
+	const known = described.get(id);
+	if (known !== undefined) return known;
+	// Header only: `inspect` never decodes pixels, AVIF included.
+	const meta = images.inspect(await readFile(file));
+	const source: SourceInfo = { format: meta.format };
+	if (described.size >= DESCRIBED_ENTRIES) {
+		const oldest = described.keys().next();
+		if (oldest.done !== true) described.delete(oldest.value);
+	}
+	described.set(id, source);
+	return source;
 }
 
 /**
@@ -243,16 +282,6 @@ async function writeCached(
 	}
 }
 
-/** MIME type for an output format, or for bytes passed through untouched. */
-function contentType(format: ImageFormat | undefined, source: string): string {
-	if (format !== undefined) return `image/${format}`;
-	const dot = source.lastIndexOf(".");
-	const extension = dot === -1 ? "" : source.slice(dot + 1).toLowerCase();
-	if (extension === "svg") return "image/svg+xml";
-	if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
-	return extension === "" ? "application/octet-stream" : `image/${extension}`;
-}
-
 /**
  * Render one variant.
  *
@@ -261,24 +290,49 @@ function contentType(format: ImageFormat | undefined, source: string): string {
  * 2560px variant of an 800px source costs one decode and yields 800px rather
  * than a soft enlargement.
  */
-async function render(
+function render(
 	images: Prism,
 	bytes: Buffer,
 	width: number,
-	format: ImageFormat | undefined,
+	format: ImageFormat,
 	quality: number,
 ): Promise<Buffer> {
-	const pipeline = images.edit(bytes).resize({ width, fit: "inside" });
-	if (format === undefined) {
-		// No format asked for: re-encode into whatever the source was. The
-		// metadata read is also what tells us the source is decodable at all.
-		const source = images.inspect(bytes).format;
-		if (!isEncodable(source)) {
-			throw new Error("source format cannot be re-encoded");
-		}
-		return pipeline.toFormat(source, quality);
-	}
-	return pipeline.toFormat(format, quality);
+	return images
+		.edit(bytes)
+		.resize({ width, fit: "inside" })
+		.toFormat(format, quality);
+}
+
+/**
+ * What a source is, read from its header, or `undefined` when the engine
+ * does not recognise it as an image at all.
+ */
+interface SourceInfo {
+	format: string;
+}
+
+/**
+ * Engine refusals that mean "this is not an image" rather than "this image
+ * cannot be served". Answered like a missing file: a root is for images, and
+ * telling a `.env` from an absent file is how a caller maps one.
+ */
+const NOT_AN_IMAGE = new Set(["E_PRISM_UNKNOWN_FORMAT", "E_PRISM_EMPTY_INPUT"]);
+
+function isNotAnImage(error: unknown): boolean {
+	return error instanceof PrismError && NOT_AN_IMAGE.has(error.code);
+}
+
+/**
+ * Headers on EVERY answer, the refusals included.
+ *
+ * The bytes are always an image the engine wrote, but the route is on the
+ * application's origin: nothing it answers may run script there or be
+ * sniffed into something that does.
+ */
+function harden(response: ImageResponse): void {
+	response
+		.header("content-security-policy", "default-src 'none'; sandbox")
+		.header("x-content-type-options", "nosniff");
 }
 
 /**
@@ -292,12 +346,26 @@ export function registerImageRoute(
 	images: Prism,
 	config: ImageServingConfig,
 ): unknown {
-	const settings = resolveConfig(config);
+	const settings = resolveConfig(config, images);
 
 	return router.get(settings.path, async (ctx) => {
+		harden(ctx.response);
 		const fail = (status: number, code: string, message: string): void => {
-			ctx.response.status(status).json({ error: { code, message } });
+			ctx.response
+				// A refusal is about this file at this moment; a cached one
+				// would outlive the fix.
+				.header("cache-control", "no-store")
+				.status(status)
+				.json({ error: { code, message } });
 		};
+		const notFound = (): void =>
+			fail(404, "E_PRISM_IMAGE_NOT_FOUND", "no such image");
+		const unprocessable = (): void =>
+			fail(
+				422,
+				"E_PRISM_IMAGE_UNPROCESSABLE",
+				"the source is not an image this endpoint can serve",
+			);
 
 		const src = queryParam(ctx.request, "src");
 		if (src === undefined) {
@@ -349,17 +417,43 @@ export function registerImageRoute(
 
 		const file = await resolveSource(src, settings.roots);
 		if (file === undefined) {
-			fail(404, "E_PRISM_IMAGE_NOT_FOUND", "no such image");
+			notFound();
 			return;
 		}
 
 		const info = await stat(file);
+		// Refused before reading: the engine would refuse it anyway, after
+		// the whole file had been pulled into memory.
+		if (info.size > settings.maxBytes) {
+			unprocessable();
+			return;
+		}
+
+		// No format asked for: re-encode into whatever the source IS — read
+		// from its content, never from its name.
+		let output = format;
+		if (output === undefined) {
+			let source: SourceInfo;
+			try {
+				source = await describe(images, file, info);
+			} catch (error) {
+				if (isNotAnImage(error)) notFound();
+				else unprocessable();
+				return;
+			}
+			if (!isEncodable(source.format)) {
+				unprocessable();
+				return;
+			}
+			output = source.format;
+		}
+
 		const key = variantKey({
 			path: file,
 			size: info.size,
 			mtimeMs: info.mtimeMs,
 			width,
-			format,
+			format: output,
 			quality,
 		});
 		const etag = `"${key}"`;
@@ -375,44 +469,37 @@ export function registerImageRoute(
 			return;
 		}
 
+		const target = output;
 		let bytes = await readCached(settings.cacheDir, key);
 		if (bytes === undefined) {
-			const pending = inFlight.get(key);
-			if (pending !== undefined) {
-				bytes = await pending;
-			} else {
-				const work = (async (): Promise<Buffer> => {
+			let work = inFlight.get(key);
+			if (work === undefined) {
+				work = (async (): Promise<Buffer> => {
 					const source = await readFile(file);
-					try {
-						const rendered = await render(
-							images,
-							source,
-							width,
-							format,
-							quality,
-						);
-						await writeCached(settings.cacheDir, key, rendered);
-						return rendered;
-					} catch {
-						// Not decodable — an SVG, or a format the engine reads
-						// but cannot write. Passing the original through is
-						// right: it already passed the root check, and the
-						// alternative is a broken image for a file that is
-						// perfectly serveable as it stands.
-						return source;
-					}
+					const rendered = await render(images, source, width, target, quality);
+					await writeCached(settings.cacheDir, key, rendered);
+					return rendered;
 				})();
+				const settled = work.finally(() => inFlight.delete(key));
+				// Every waiter handles the rejection itself; this copy only
+				// clears the slot.
+				settled.catch(() => undefined);
 				inFlight.set(key, work);
-				try {
-					bytes = await work;
-				} finally {
-					inFlight.delete(key);
-				}
+			}
+			try {
+				bytes = await work;
+			} catch (error) {
+				// No passthrough. What leaves this route is something the
+				// engine re-encoded, or nothing: the original of a file that
+				// failed to render is exactly the file nobody vetted.
+				if (isNotAnImage(error)) notFound();
+				else unprocessable();
+				return;
 			}
 		}
 
 		ctx.response
-			.type(contentType(format, file))
+			.type(`image/${target}`)
 			.header("etag", etag)
 			// `immutable` because the key covers the source's mtime: an edited
 			// file produces a different key, so nothing a browser holds can

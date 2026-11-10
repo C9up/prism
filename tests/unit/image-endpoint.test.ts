@@ -75,6 +75,7 @@ async function call(
 /** Mount the endpoint on a router that only records the handler. */
 function mount(
 	config: ImageServingConfig,
+	engine: Prism = images,
 ): (
 	query: Record<string, string>,
 	headers?: Record<string, string>,
@@ -87,7 +88,7 @@ function mount(
 				return undefined;
 			},
 		},
-		images,
+		engine,
 		config,
 	);
 	if (handler === undefined) throw new Error("no handler registered");
@@ -287,20 +288,6 @@ describe("what the endpoint serves", () => {
 		expect(images.inspect(answer.body ?? Buffer.alloc(0)).format).toBe("png");
 	});
 
-	it("passes a file it cannot decode through untouched", async () => {
-		// An SVG is already resolution-independent and already passed the root
-		// check. A 415 here would be a broken image for a perfectly good file.
-		const svg = Buffer.from(
-			'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>',
-		);
-		const { dir } = await root({ "logo.svg": svg });
-		const request = mount({ roots: [dir], widths: [400] });
-		const answer = await request({ src: "logo.svg", w: "400" });
-		expect(answer.status).toBe(200);
-		expect(answer.headers["content-type"]).toBe("image/svg+xml");
-		expect(answer.body?.equals(svg)).toBe(true);
-	});
-
 	it("finds a file in the second root when the first does not have it", async () => {
 		const first = await root();
 		const second = await root({ "only-here.png": detailedPng(100, 100) });
@@ -323,6 +310,120 @@ describe("what the endpoint serves", () => {
 		expect(images.inspect(body).format).toBe("jpeg");
 		expect(body.includes(Buffer.from("Exif\0\0", "binary"))).toBe(false);
 		expect(body.includes(Buffer.from("51.5N 0.12W"))).toBe(false);
+	});
+});
+
+describe("what never leaves the route", () => {
+	// A source that fails to render used to be sent as it was. That is the
+	// one file nobody vetted: an SVG with a script, a photo still carrying its
+	// GPS block, anything else that happened to sit in a root.
+	const evilSvg = Buffer.from(
+		'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>fetch("/account")</script></svg>',
+	);
+
+	it("refuses an SVG instead of serving it from the application's origin", async () => {
+		const { dir } = await root({ "evil.svg": evilSvg });
+		const request = mount({ roots: [dir], widths: [640] });
+		const queries: Record<string, string>[] = [
+			{ src: "evil.svg", w: "640" },
+			{ src: "evil.svg", w: "640", f: "webp" },
+		];
+		for (const query of queries) {
+			const answer = await request(query);
+			expect(answer.status, JSON.stringify(query)).toBe(404);
+			expect(answer.body).toBeUndefined();
+			expect(JSON.stringify(answer.json)).not.toContain("script");
+		}
+	});
+
+	it("refuses a file in a root that is not an image at all", async () => {
+		const { dir } = await root({
+			".env": Buffer.from("DB_PASSWORD=hunter2\n"),
+		});
+		const request = mount({ roots: [dir], widths: [640] });
+		const answer = await request({ src: ".env", w: "640" });
+		// Answered like a missing file: a root holds images, and telling a
+		// secret from an absent file is how a caller maps the disk.
+		expect(answer.status).toBe(404);
+		expect(answer.body).toBeUndefined();
+		const missing = await request({ src: "nope.png", w: "640" });
+		expect(answer.json).toEqual(missing.json);
+	});
+
+	it("refuses a photo it cannot render rather than sending its EXIF out", async () => {
+		const withExif = jpegWithExif(await encodeJpeg(), "48.8567N 2.3508E");
+		const { dir } = await root({ "huge.jpg": withExif });
+		// Over the pixel ceiling: the engine refuses it, and the original —
+		// GPS block and all — used to go out instead.
+		const tight = new Prism({ limits: { maxPixels: 1000 } });
+		const request = mount({ roots: [dir], widths: [100] }, tight);
+		const queries: Record<string, string>[] = [
+			{ src: "huge.jpg", w: "100" },
+			{ src: "huge.jpg", w: "100", f: "jpeg" },
+		];
+		for (const query of queries) {
+			const answer = await request(query);
+			expect(answer.status, JSON.stringify(query)).toBe(422);
+			expect(answer.body).toBeUndefined();
+			expect(answer.json).toMatchObject({
+				error: { code: "E_PRISM_IMAGE_UNPROCESSABLE" },
+			});
+			expect(answer.headers["cache-control"]).toBe("no-store");
+		}
+	});
+
+	it("refuses an image that is corrupt", async () => {
+		const png = detailedPng(40, 40);
+		const corrupt = Buffer.concat([png.subarray(0, 60), Buffer.alloc(200, 7)]);
+		const { dir } = await root({ "broken.png": corrupt });
+		const request = mount({ roots: [dir], widths: [16] });
+		const answer = await request({ src: "broken.png", w: "16", f: "webp" });
+		expect(answer.status).toBe(422);
+		expect(answer.body).toBeUndefined();
+	});
+
+	it("refuses a source over the byte limit before reading it", async () => {
+		const { dir } = await root();
+		const small = new Prism({ limits: { maxBytes: 100 } });
+		const request = mount({ roots: [dir], widths: [400] }, small);
+		const spy = vi.spyOn(small, "inspect");
+		const answer = await request({ src: "photo.png", w: "400" });
+		expect(answer.status).toBe(422);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("labels the bytes with the format the engine wrote, never the file's name", async () => {
+		// A PNG named .jpg is re-encoded as what it IS.
+		const { dir } = await root({ "misnamed.jpg": detailedPng(40, 30) });
+		const request = mount({ roots: [dir], widths: [16] });
+		const answer = await request({ src: "misnamed.jpg", w: "16" });
+		expect(answer.status).toBe(200);
+		expect(answer.headers["content-type"]).toBe("image/png");
+		expect(images.inspect(answer.body ?? Buffer.alloc(0)).format).toBe("png");
+	});
+
+	it("sends the hardening headers on every answer", async () => {
+		const { dir } = await root({ "evil.svg": evilSvg });
+		const request = mount({ roots: [dir], widths: [400] });
+		const served = await request({ src: "photo.png", w: "400", f: "webp" });
+		const answers = [
+			served,
+			await request({ src: "evil.svg", w: "400" }),
+			await request({ src: "photo.png", w: "401" }),
+			await request(
+				{ src: "photo.png", w: "400", f: "webp" },
+				{ "if-none-match": served.headers.etag ?? "" },
+			),
+		];
+		expect(answers.map((answer) => answer.status)).toEqual([
+			200, 404, 400, 304,
+		]);
+		for (const answer of answers) {
+			expect(answer.headers["content-security-policy"]).toBe(
+				"default-src 'none'; sandbox",
+			);
+			expect(answer.headers["x-content-type-options"]).toBe("nosniff");
+		}
 	});
 });
 
