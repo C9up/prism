@@ -49,7 +49,7 @@ function isNativePrism(value: unknown): value is NativePrism {
 	return hasFunctions(value, NATIVE_CALLS);
 }
 
-const attempt = loadNativeBinary(isNativePrism);
+const attempt = loadNativeBinary(isNativePrism, NATIVE_CALLS);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
