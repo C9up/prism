@@ -21,6 +21,15 @@
  * lists is a 400 and is never decoded — refusing before the work is the whole
  * point.
  *
+ * Bounding the number of answers does not bound what producing one costs,
+ * nor how often it is produced. So a variant is rendered at most once — keyed
+ * by the width it will REALLY have, so every width past the source's own
+ * collapses to one render, and kept in a cache that is on by default — and
+ * renders run a few at a time. An AVIF encode is seconds of CPU on the libuv
+ * pool that also serves the application's fs, dns and crypto; four of them at
+ * once froze an application for a minute and a half. Past the queue, the
+ * answer is a 503 the client can retry, not a longer wait for everyone.
+ *
  * Height and crop are deliberately absent. They are the two axes that cannot
  * be allow-listed without making the component unusable, and neither is needed
  * — a responsive image crops with `object-fit`, in the browser, for free.
@@ -82,8 +91,28 @@ interface ResolvedConfig {
 	qualities: ReadonlySet<number>;
 	quality: number;
 	cacheDir: string | undefined;
+	memoryCacheBytes: number;
 	maxAge: number;
 	maxBytes: number;
+	concurrency: number;
+	queueLimit: number;
+	effort: number;
+	autoOrient: boolean;
+}
+
+/** A configured count, refused at mount rather than misread per request. */
+function count(
+	name: string,
+	value: number,
+	minimum: number,
+	maximum = Number.MAX_SAFE_INTEGER,
+): number {
+	if (!Number.isInteger(value) || value < minimum || value > maximum) {
+		throw new Error(
+			`[prism] images.serve.${name} must be an integer from ${minimum} to ${maximum}, got ${value}.`,
+		);
+	}
+	return value;
 }
 
 /** The engine's own default for `limits.maxBytes`. */
@@ -103,9 +132,101 @@ function resolveConfig(
 		qualities: new Set(config.qualities ?? [quality]),
 		quality,
 		cacheDir: config.cacheDir,
+		memoryCacheBytes: count(
+			"memoryCacheBytes",
+			config.memoryCacheBytes ?? 32 * 1024 * 1024,
+			0,
+		),
 		maxAge: config.maxAge ?? 31_536_000,
 		maxBytes: images.config().limits?.maxBytes ?? DEFAULT_MAX_BYTES,
+		// Below libuv's default pool of four, so a burst of renders leaves
+		// threads for the rest of the application.
+		concurrency: count("concurrency", config.concurrency ?? 2, 1),
+		queueLimit: count("queueLimit", config.queueLimit ?? 64, 0),
+		// The fast end: an image encoded while a visitor waits. Measured on a
+		// 1600px noise image, effort 4 took four times as long as effort 1
+		// (10 s against 2.5 s) for bytes within one percent.
+		effort: count("effort", config.effort ?? 1, 0, 9),
+		autoOrient: images.config().autoOrient !== false,
 	};
+}
+
+/**
+ * At most `limit` renders at once, at most `queueLimit` waiting.
+ *
+ * A slot is a release function; `undefined` means the queue is full and the
+ * request should be turned away now rather than wait behind it.
+ */
+class RenderGate {
+	readonly #limit: number;
+	readonly #queueLimit: number;
+	#active = 0;
+	readonly #waiting: (() => void)[] = [];
+
+	constructor(limit: number, queueLimit: number) {
+		this.#limit = limit;
+		this.#queueLimit = queueLimit;
+	}
+
+	acquire(): Promise<() => void> | undefined {
+		if (this.#active < this.#limit) {
+			this.#active++;
+			return Promise.resolve(this.#releaser());
+		}
+		if (this.#waiting.length >= this.#queueLimit) return undefined;
+		return new Promise((resolve) => {
+			this.#waiting.push(() => resolve(this.#releaser()));
+		});
+	}
+
+	#releaser(): () => void {
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const next = this.#waiting.shift();
+			// The slot passes straight to the next in line, so `#active`
+			// only drops when nobody is waiting.
+			if (next !== undefined) next();
+			else this.#active--;
+		};
+	}
+}
+
+/**
+ * Rendered variants kept in memory, least recently used dropped first.
+ *
+ * The default when no `cacheDir` is configured: without any cache, every
+ * request for the same variant is a fresh decode and encode.
+ */
+class MemoryCache {
+	readonly #limit: number;
+	#bytes = 0;
+	readonly #entries = new Map<string, Buffer>();
+
+	constructor(limit: number) {
+		this.#limit = limit;
+	}
+
+	get(key: string): Buffer | undefined {
+		const hit = this.#entries.get(key);
+		if (hit === undefined) return undefined;
+		this.#entries.delete(key);
+		this.#entries.set(key, hit);
+		return hit;
+	}
+
+	set(key: string, bytes: Buffer): void {
+		if (bytes.length > this.#limit || this.#entries.has(key)) return;
+		while (this.#bytes + bytes.length > this.#limit) {
+			const oldest = this.#entries.entries().next();
+			if (oldest.done === true) break;
+			this.#entries.delete(oldest.value[0]);
+			this.#bytes -= oldest.value[1].length;
+		}
+		this.#entries.set(key, bytes);
+		this.#bytes += bytes.length;
+	}
 }
 
 interface ImageRequest {
@@ -234,7 +355,11 @@ async function describe(
 	if (known !== undefined) return known;
 	// Header only: `inspect` never decodes pixels, AVIF included.
 	const meta = images.inspect(await readFile(file));
-	const source: SourceInfo = { format: meta.format };
+	const source: SourceInfo = {
+		format: meta.format,
+		width: meta.width,
+		orientedWidth: meta.orientedWidth,
+	};
 	if (described.size >= DESCRIBED_ENTRIES) {
 		const oldest = described.keys().next();
 		if (oldest.done !== true) described.delete(oldest.value);
@@ -296,11 +421,12 @@ function render(
 	width: number,
 	format: ImageFormat,
 	quality: number,
+	effort: number,
 ): Promise<Buffer> {
 	return images
 		.edit(bytes)
 		.resize({ width, fit: "inside" })
-		.toFormat(format, quality);
+		.toBuffer({ format, quality, effort });
 }
 
 /**
@@ -309,6 +435,9 @@ function render(
  */
 interface SourceInfo {
 	format: string;
+	width: number;
+	/** The width after the EXIF orientation, which the pipeline applies. */
+	orientedWidth: number;
 }
 
 /**
@@ -347,6 +476,11 @@ export function registerImageRoute(
 	config: ImageServingConfig,
 ): unknown {
 	const settings = resolveConfig(config, images);
+	const gate = new RenderGate(settings.concurrency, settings.queueLimit);
+	const memory =
+		settings.cacheDir === undefined && settings.memoryCacheBytes > 0
+			? new MemoryCache(settings.memoryCacheBytes)
+			: undefined;
 
 	return router.get(settings.path, async (ctx) => {
 		harden(ctx.response);
@@ -429,30 +563,37 @@ export function registerImageRoute(
 			return;
 		}
 
+		let source: SourceInfo;
+		try {
+			source = await describe(images, file, info);
+		} catch (error) {
+			if (isNotAnImage(error)) notFound();
+			else unprocessable();
+			return;
+		}
 		// No format asked for: re-encode into whatever the source IS — read
 		// from its content, never from its name.
 		let output = format;
 		if (output === undefined) {
-			let source: SourceInfo;
-			try {
-				source = await describe(images, file, info);
-			} catch (error) {
-				if (isNotAnImage(error)) notFound();
-				else unprocessable();
-				return;
-			}
 			if (!isEncodable(source.format)) {
 				unprocessable();
 				return;
 			}
 			output = source.format;
 		}
+		// The width the variant will really have. `inside` never enlarges, so
+		// 3200, 3840 and 5120 of a 3000px source are one image — and one
+		// render, not three.
+		const effectiveWidth = Math.min(
+			width,
+			settings.autoOrient ? source.orientedWidth : source.width,
+		);
 
 		const key = variantKey({
 			path: file,
 			size: info.size,
 			mtimeMs: info.mtimeMs,
-			width,
+			width: effectiveWidth,
 			format: output,
 			quality,
 		});
@@ -470,15 +611,37 @@ export function registerImageRoute(
 		}
 
 		const target = output;
-		let bytes = await readCached(settings.cacheDir, key);
+		let bytes = memory?.get(key) ?? (await readCached(settings.cacheDir, key));
 		if (bytes === undefined) {
 			let work = inFlight.get(key);
 			if (work === undefined) {
+				const slot = gate.acquire();
+				if (slot === undefined) {
+					ctx.response.header("retry-after", "2");
+					fail(
+						503,
+						"E_PRISM_IMAGE_BUSY",
+						"too many images are being rendered; retry shortly",
+					);
+					return;
+				}
 				work = (async (): Promise<Buffer> => {
-					const source = await readFile(file);
-					const rendered = await render(images, source, width, target, quality);
-					await writeCached(settings.cacheDir, key, rendered);
-					return rendered;
+					const release = await slot;
+					try {
+						const rendered = await render(
+							images,
+							await readFile(file),
+							effectiveWidth,
+							target,
+							quality,
+							settings.effort,
+						);
+						memory?.set(key, rendered);
+						await writeCached(settings.cacheDir, key, rendered);
+						return rendered;
+					} finally {
+						release();
+					}
 				})();
 				const settled = work.finally(() => inFlight.delete(key));
 				// Every waiter handles the rejection itself; this copy only

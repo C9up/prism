@@ -17,8 +17,12 @@ import {
 	type ImageHttpContext,
 	registerImageRoute,
 } from "../../src/ImageEndpoint.js";
-import { Prism } from "../../src/Prism.js";
-import type { ImageServingConfig } from "../../src/types.js";
+import { Pipeline, Prism } from "../../src/Prism.js";
+import type {
+	ImageServingConfig,
+	OutputOptions,
+	PrismConfig,
+} from "../../src/types.js";
 import { detailedPng } from "../helpers/png.js";
 
 const images = new Prism();
@@ -423,6 +427,149 @@ describe("what never leaves the route", () => {
 				"default-src 'none'; sandbox",
 			);
 			expect(answer.headers["x-content-type-options"]).toBe("nosniff");
+		}
+	});
+});
+
+/**
+ * An engine whose renders wait until the test lets them finish, and which
+ * counts them. Inspection is the real one, so sources are read for real.
+ */
+class HeldPrism extends Prism {
+	renders = 0;
+	running = 0;
+	mostAtOnce = 0;
+	outputs: OutputOptions[] = [];
+	readonly #held: (() => void)[] = [];
+
+	override edit(bytes: Buffer): Pipeline {
+		return new HeldPipeline(bytes, this.config(), this);
+	}
+
+	/** A render starts: counted, then parked until released. */
+	async hold(output: OutputOptions): Promise<void> {
+		this.renders++;
+		this.running++;
+		this.mostAtOnce = Math.max(this.mostAtOnce, this.running);
+		this.outputs.push(output);
+		await new Promise<void>((resolve) => this.#held.push(resolve));
+		this.running--;
+	}
+
+	releaseAll(): void {
+		for (const resolve of this.#held.splice(0)) resolve();
+	}
+
+	/** Let the event loop run until `count` renders are parked. */
+	async parked(count: number): Promise<void> {
+		const deadline = Date.now() + 5_000;
+		while (this.#held.length < count && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+		expect(this.#held.length).toBe(count);
+	}
+}
+
+class HeldPipeline extends Pipeline {
+	readonly #engine: HeldPrism;
+
+	constructor(input: Buffer, config: PrismConfig, engine: HeldPrism) {
+		super(input, config);
+		this.#engine = engine;
+	}
+
+	override async toBuffer(output: OutputOptions): Promise<Buffer> {
+		await this.#engine.hold(output);
+		return super.toBuffer(output);
+	}
+}
+
+describe("what producing a variant costs", () => {
+	it("runs at most `concurrency` renders and turns away what the queue cannot hold", async () => {
+		const { dir } = await root();
+		const engine = new HeldPrism();
+		const widths = [100, 200, 300, 400, 500];
+		const request = mount(
+			{ roots: [dir], widths, concurrency: 2, queueLimit: 2 },
+			engine,
+		);
+		const answers = widths.map((w) =>
+			request({ src: "photo.png", w: String(w), f: "webp" }),
+		);
+		await engine.parked(2);
+		// Two rendering, two waiting, the last to arrive refused at once —
+		// which one that is depends on how the file reads interleave.
+		while (engine.renders < 4 || engine.running > 0) {
+			engine.releaseAll();
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+		const settled = await Promise.all(answers);
+		const statuses = settled.map((answer) => answer.status).sort();
+		expect(statuses).toEqual([200, 200, 200, 200, 503]);
+		const refused = settled.find((answer) => answer.status === 503);
+		expect(refused?.headers["retry-after"]).toBe("2");
+		expect(refused?.headers["cache-control"]).toBe("no-store");
+		expect(refused?.json).toMatchObject({
+			error: { code: "E_PRISM_IMAGE_BUSY" },
+		});
+		expect(engine.mostAtOnce).toBe(2);
+		expect(engine.renders).toBe(4);
+	});
+
+	it("renders every width past the source's own once", async () => {
+		// 1280, 1668 and 1920 of an 800px source are the same 800px image.
+		const { dir } = await root();
+		const request = mount({ roots: [dir] });
+		const spy = vi.spyOn(images, "edit");
+		const answers = [];
+		for (const w of ["1280", "1668", "1920"]) {
+			answers.push(await request({ src: "photo.png", w, f: "webp" }));
+		}
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(new Set(answers.map((answer) => answer.headers.etag)).size).toBe(1);
+		expect(images.inspect(answers[2]?.body ?? Buffer.alloc(0)).width).toBe(800);
+	});
+
+	it("caches by default, so a repeated request is not a second render", async () => {
+		const { dir } = await root();
+		const request = mount({ roots: [dir], widths: [400] });
+		const spy = vi.spyOn(images, "edit");
+		const first = await request({ src: "photo.png", w: "400", f: "webp" });
+		const second = await request({ src: "photo.png", w: "400", f: "webp" });
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(second.body?.equals(first.body ?? Buffer.alloc(0))).toBe(true);
+	});
+
+	it("encodes AVIF at a fast effort unless configured otherwise", async () => {
+		const { dir } = await root();
+		const fast = new HeldPrism();
+		const fastRequest = mount({ roots: [dir], widths: [64] }, fast);
+		const pending = fastRequest({ src: "photo.png", w: "64", f: "avif" });
+		await fast.parked(1);
+		fast.releaseAll();
+		expect((await pending).status).toBe(200);
+		expect(fast.outputs[0]).toMatchObject({ format: "avif", effort: 1 });
+
+		const slow = new HeldPrism();
+		const slowRequest = mount({ roots: [dir], widths: [64], effort: 6 }, slow);
+		const later = slowRequest({ src: "photo.png", w: "64", f: "avif" });
+		await slow.parked(1);
+		slow.releaseAll();
+		await later;
+		expect(slow.outputs[0]).toMatchObject({ effort: 6 });
+	});
+
+	it("refuses a nonsensical bound when it is mounted, not per request", () => {
+		for (const serve of [
+			{ concurrency: 0 },
+			{ concurrency: 1.5 },
+			{ queueLimit: -1 },
+			{ effort: 10 },
+			{ memoryCacheBytes: Number.NaN },
+		]) {
+			expect(() => mount({ roots: ["/nowhere"], ...serve })).toThrow(
+				/images\.serve\./,
+			);
 		}
 	});
 });

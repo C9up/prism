@@ -278,14 +278,38 @@ export interface ImageServingConfig {
 	/** Quality applied when the request names none. Defaults to 82. */
 	quality?: number;
 	/**
-	 * Where rendered variants are kept.
+	 * Where rendered variants are kept, on disk.
 	 *
-	 * Without it every request re-decodes, which is survivable in development
-	 * and is not a thing to run in production.
+	 * Without it they are kept in memory (see `memoryCacheBytes`), which a
+	 * restart empties and other processes do not share.
 	 */
 	cacheDir?: string;
+	/**
+	 * Without a `cacheDir`, rendered variants are kept in memory, up to this
+	 * many bytes, least recently used dropped first. Defaults to 32 MiB; 0
+	 * turns it off.
+	 */
+	memoryCacheBytes?: number;
 	/** `max-age`, in seconds. Defaults to a year. */
 	maxAge?: number;
+	/**
+	 * Renders run at once. Defaults to 2.
+	 *
+	 * A render is up to seconds of CPU on libuv's thread pool — four threads
+	 * by default, shared with the application's file, DNS and crypto calls.
+	 * Keep it below `UV_THREADPOOL_SIZE`.
+	 */
+	concurrency?: number;
+	/**
+	 * Renders allowed to wait for a slot. Defaults to 64. Past it, a request
+	 * is answered 503 with `Retry-After` rather than joining the queue.
+	 */
+	queueLimit?: number;
+	/**
+	 * AVIF encoding effort, 0 (fastest) to 9 (slowest). Defaults to 1: the
+	 * image is encoded while a visitor waits.
+	 */
+	effort?: number;
 }
 
 export interface PrismConfig {
