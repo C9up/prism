@@ -9,9 +9,11 @@
  */
 
 import {
+	lstat,
 	mkdir,
 	mkdtemp,
 	readdir,
+	rename,
 	rm,
 	stat,
 	symlink,
@@ -33,6 +35,43 @@ import type {
 	PrismConfig,
 } from "../../src/types.js";
 import { detailedPng } from "../helpers/png.js";
+
+/**
+ * Hooks into the filesystem calls the endpoint makes, so a test can change
+ * the disk at the exact moment between a check and the read that follows it.
+ */
+const fsHooks = vi.hoisted(() => {
+	const hooks: {
+		afterRealpath?: (real: string) => Promise<void>;
+		afterOpen?: (path: string) => Promise<void>;
+		/** Answer like a system without procfs (macOS, Windows). */
+		noProcfs?: boolean;
+	} = {};
+	return hooks;
+});
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs/promises")>();
+	return {
+		...actual,
+		realpath: async (path: string) => {
+			const real = await actual.realpath(path);
+			await fsHooks.afterRealpath?.(real);
+			return real;
+		},
+		open: async (path: string, flags?: number) => {
+			const handle = await actual.open(path, flags);
+			await fsHooks.afterOpen?.(path);
+			return handle;
+		},
+		readlink: async (path: string) => {
+			if (fsHooks.noProcfs === true && path.startsWith("/proc/")) {
+				throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+			}
+			return actual.readlink(path);
+		},
+	};
+});
 
 const images = new Prism();
 
@@ -127,6 +166,9 @@ async function root(
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	fsHooks.afterRealpath = undefined;
+	fsHooks.afterOpen = undefined;
+	fsHooks.noProcfs = undefined;
 	while (temporary.length > 0) {
 		const dir = temporary.pop();
 		if (dir !== undefined) await rm(dir, { recursive: true, force: true });
@@ -329,6 +371,89 @@ describe("what the endpoint refuses", () => {
 			f: "webp",
 		});
 		expect(answer.status).toBe(200);
+	});
+
+	for (const procfs of [true, false]) {
+		const label = procfs ? "" : " (no procfs)";
+
+		it(`refuses a source swapped for an outside link after its check${label}`, async () => {
+			fsHooks.noProcfs = !procfs;
+			// Someone who can write in the root replaces the checked file with a
+			// link to an image elsewhere, between the confinement check and the
+			// read. What is read must be what was checked, or nothing.
+			const outside = await root();
+			await writeFile(join(outside.dir, "small.png"), detailedPng(300, 200));
+			const { dir } = await root();
+			const checked = join(dir, "photo.png");
+			fsHooks.afterRealpath = async (real) => {
+				if (!real.endsWith("photo.png")) return;
+				fsHooks.afterRealpath = undefined;
+				await rm(real);
+				await symlink(join(outside.dir, "small.png"), real);
+			};
+			const request = mount({ roots: [dir], widths: [400] });
+			const answer = await request({ src: "photo.png", w: "400", f: "png" });
+			expect(fsHooks.afterRealpath).toBeUndefined();
+			expect(answer.status).toBe(404);
+			expect(answer.body).toBeUndefined();
+			expect((await lstat(checked)).isSymbolicLink()).toBe(true);
+		});
+
+		it(`refuses a source whose directory is swapped for an outside link after its check${label}`, async () => {
+			fsHooks.noProcfs = !procfs;
+			// The same race one level up: no-follow on the last segment alone
+			// would still walk through a swapped directory.
+			const outside = await mkdtemp(join(tmpdir(), "prism-outside-"));
+			temporary.push(outside);
+			await mkdir(join(outside, "sub"));
+			await writeFile(join(outside, "sub", "photo.png"), detailedPng(300, 200));
+			const { dir, source } = await root();
+			await mkdir(join(dir, "sub"));
+			await writeFile(join(dir, "sub", "photo.png"), source);
+			fsHooks.afterRealpath = async (real) => {
+				if (!real.endsWith(join("sub", "photo.png"))) return;
+				fsHooks.afterRealpath = undefined;
+				await rename(join(dir, "sub"), join(dir, "sub-before"));
+				await symlink(join(outside, "sub"), join(dir, "sub"));
+			};
+			const request = mount({ roots: [dir], widths: [400] });
+			const answer = await request({
+				src: "sub/photo.png",
+				w: "400",
+				f: "png",
+			});
+			expect(fsHooks.afterRealpath).toBeUndefined();
+			expect(answer.status).toBe(404);
+			expect(answer.body).toBeUndefined();
+		});
+	}
+
+	it("serves an unchanged source when procfs cannot be asked", async () => {
+		fsHooks.noProcfs = true;
+		const { dir } = await root();
+		const request = mount({ roots: [dir], widths: [400] });
+		const answer = await request({ src: "photo.png", w: "400", f: "png" });
+		expect(answer.status).toBe(200);
+	});
+
+	it("renders the file it checked even when the path changes after it is opened", async () => {
+		// Once open, the endpoint reads from that handle: replacing the file
+		// at the path no longer changes what is rendered.
+		const outside = await root();
+		await writeFile(join(outside.dir, "small.png"), detailedPng(300, 200));
+		const { dir } = await root();
+		fsHooks.afterOpen = async (path) => {
+			if (!path.endsWith("photo.png")) return;
+			fsHooks.afterOpen = undefined;
+			await rm(path);
+			await symlink(join(outside.dir, "small.png"), path);
+		};
+		const request = mount({ roots: [dir], widths: [400] });
+		const answer = await request({ src: "photo.png", w: "400", f: "png" });
+		expect(fsHooks.afterOpen).toBeUndefined();
+		expect(answer.status).toBe(200);
+		if (answer.body === undefined) throw new Error("no body");
+		expect(images.inspect(answer.body).width).toBe(400);
 	});
 
 	it("accepts a root that is itself a symbolic link", async () => {

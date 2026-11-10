@@ -44,10 +44,14 @@
  */
 
 import { createHash } from "node:crypto";
+import { constants, type Stats } from "node:fs";
 import {
+	type FileHandle,
 	mkdir,
+	open,
 	readdir,
 	readFile,
+	readlink,
 	realpath,
 	rename,
 	stat,
@@ -296,15 +300,19 @@ function within(root: string, path: string): boolean {
  * on the resolved path catches the encodings nobody thought of; and the same
  * check on the REAL path catches a symbolic link — planted by an archive
  * extracted into an upload directory, a shared volume, a careless deploy —
- * that is inside a root by name and anywhere on the disk by target. The file
- * returned is the real path that was checked, so what is read is what was
- * confined. A `src` reaching outside is not an error worth distinguishing from
- * a missing file — telling them apart is how a caller maps the disk.
+ * that is inside a root by name and anywhere on the disk by target.
+ *
+ * A checked path is still only a name: whoever can write in the root can swap
+ * the file, or a directory above it, for a link between the check and the
+ * read. So the source comes back OPEN, its confinement is checked on that
+ * handle, and every later read goes through it. A `src` reaching outside is
+ * not an error worth distinguishing from a missing file — telling them apart
+ * is how a caller maps the disk.
  */
 async function resolveSource(
 	src: string,
 	roots: readonly string[],
-): Promise<string | undefined> {
+): Promise<OpenedSource | undefined> {
 	// `/photos/hero.png` is how a page names a public file, and Next's image
 	// optimizer takes it as such: one leading slash is read as "under the
 	// roots". Exactly one — `//host/a.png` is a protocol-relative URL, and
@@ -320,6 +328,7 @@ async function resolveSource(
 	for (const root of roots) {
 		const candidate = resolvePath(join(root, src));
 		if (!within(root, candidate)) continue;
+		let handle: FileHandle | undefined;
 		try {
 			// The root's own real path too: a root that is itself a link
 			// (a release directory, a mounted volume) is legitimate.
@@ -328,13 +337,86 @@ async function resolveSource(
 				realpath(candidate),
 			]);
 			if (!within(realRoot, real)) continue;
-			const info = await stat(real);
-			if (info.isFile()) return real;
+			handle = await open(real, OPEN_SOURCE);
+			const info = await handle.stat();
+			if (
+				info.isFile() &&
+				(await openedWithin(handle, realRoot, candidate, real))
+			) {
+				return { path: real, handle, info };
+			}
 		} catch {
 			// Not in this root; try the next.
 		}
+		await handle?.close().catch(() => undefined);
 	}
 	return undefined;
+}
+
+/**
+ * Read-only, never through a link at the last segment (a swapped file fails
+ * the open), and without blocking on a FIFO someone left in a root.
+ */
+const OPEN_SOURCE =
+	constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+/** A source as it was checked: its real path and the handle all reads use. */
+interface OpenedSource {
+	path: string;
+	handle: FileHandle;
+	info: Stats;
+}
+
+/**
+ * Is the file behind `handle` inside `realRoot`?
+ *
+ * Asked of the handle, not of the name: a directory above the file swapped
+ * for a link after `realpath` is walked through by `open` whatever its flags.
+ * Linux names the file an open descriptor refers to in `/proc/self/fd`, which
+ * settles it. Without procfs, the path is resolved again and must still be
+ * the checked one and the same inode as the handle.
+ */
+async function openedWithin(
+	handle: FileHandle,
+	realRoot: string,
+	candidate: string,
+	real: string,
+): Promise<boolean> {
+	let located: string | undefined;
+	try {
+		located = await readlink(`/proc/self/fd/${handle.fd}`);
+	} catch {
+		located = undefined;
+	}
+	if (located !== undefined) return within(realRoot, located);
+	const again = await realpath(candidate);
+	if (again !== real) return false;
+	const [now, opened] = await Promise.all([
+		stat(again, { bigint: true }),
+		handle.stat({ bigint: true }),
+	]);
+	return now.dev === opened.dev && now.ino === opened.ino;
+}
+
+/**
+ * The first `size` bytes of an open source, read by position so every read of
+ * the same handle starts at its beginning.
+ */
+async function readSource(source: OpenedSource): Promise<Buffer> {
+	const size = source.info.size;
+	const buffer = Buffer.alloc(size);
+	let filled = 0;
+	while (filled < size) {
+		const { bytesRead } = await source.handle.read(
+			buffer,
+			filled,
+			size - filled,
+			filled,
+		);
+		if (bytesRead === 0) break;
+		filled += bytesRead;
+	}
+	return buffer.subarray(0, filled);
 }
 
 /**
@@ -377,14 +459,13 @@ const DESCRIBED_ENTRIES = 1024;
 
 async function describe(
 	images: Prism,
-	file: string,
-	info: { size: number; mtimeMs: number },
+	file: OpenedSource,
 ): Promise<SourceInfo> {
-	const id = [file, info.size, info.mtimeMs].join("\u0000");
+	const id = [file.path, file.info.size, file.info.mtimeMs].join("\u0000");
 	const known = described.get(id);
 	if (known !== undefined) return known;
 	// Header only: `inspect` never decodes pixels, AVIF included.
-	const meta = images.inspect(await readFile(file));
+	const meta = images.inspect(await readSource(file));
 	const source: SourceInfo = {
 		format: meta.format,
 		width: meta.width,
@@ -636,125 +717,132 @@ export function registerImageRoute(
 			notFound();
 			return;
 		}
-
-		const info = await stat(file);
-		// Refused before reading: the engine would refuse it anyway, after
-		// the whole file had been pulled into memory.
-		if (info.size > settings.maxBytes) {
-			unprocessable();
-			return;
-		}
-
-		let source: SourceInfo;
+		// Closed whatever the answer: every read below goes through it.
 		try {
-			source = await describe(images, file, info);
-		} catch (error) {
-			if (isNotAnImage(error)) notFound();
-			else unprocessable();
-			return;
-		}
-		// No format asked for: re-encode into whatever the source IS — read
-		// from its content, never from its name.
-		let output = format;
-		if (output === undefined) {
-			if (!isEncodable(source.format)) {
+			const info = file.info;
+			// Refused before reading: the engine would refuse it anyway, after
+			// the whole file had been pulled into memory.
+			if (info.size > settings.maxBytes) {
 				unprocessable();
 				return;
 			}
-			output = source.format;
-		}
-		// The width the variant will really have. `inside` never enlarges, so
-		// 3200, 3840 and 5120 of a 3000px source are one image — and one
-		// render, not three.
-		const effectiveWidth = Math.min(
-			width,
-			settings.autoOrient ? source.orientedWidth : source.width,
-		);
 
-		const key = variantKey({
-			path: file,
-			size: info.size,
-			mtimeMs: info.mtimeMs,
-			width: effectiveWidth,
-			format: output,
-			quality,
-		});
-		const etag = `"${key}"`;
-
-		// Answered before any read: a browser revalidating fifteen variants of
-		// one image should cost fifteen header comparisons.
-		if (ctx.request.header("if-none-match") === etag) {
-			ctx.response
-				.header("etag", etag)
-				.header("cache-control", `public, max-age=${settings.maxAge}`)
-				.status(304)
-				.sendBuffer(Buffer.alloc(0));
-			return;
-		}
-
-		const target = output;
-		const onDisk = diskSlot(
-			settings.cacheDir,
-			{ path: file, size: info.size, mtimeMs: info.mtimeMs },
-			key,
-		);
-		let bytes = memory?.get(key) ?? (await readCached(onDisk));
-		if (bytes === undefined) {
-			let work = inFlight.get(key);
-			if (work === undefined) {
-				const slot = gate.acquire();
-				if (slot === undefined) {
-					ctx.response.header("retry-after", "2");
-					fail(
-						503,
-						"E_PRISM_IMAGE_BUSY",
-						"too many images are being rendered; retry shortly",
-					);
-					return;
-				}
-				work = (async (): Promise<Buffer> => {
-					const release = await slot;
-					try {
-						const rendered = await render(
-							images,
-							await readFile(file),
-							effectiveWidth,
-							target,
-							quality,
-							settings.effort,
-						);
-						memory?.set(key, rendered);
-						await writeCached(onDisk, rendered);
-						return rendered;
-					} finally {
-						release();
-					}
-				})();
-				const settled = work.finally(() => inFlight.delete(key));
-				// Every waiter handles the rejection itself; this copy only
-				// clears the slot.
-				settled.catch(() => undefined);
-				inFlight.set(key, work);
-			}
+			let source: SourceInfo;
 			try {
-				bytes = await work;
+				source = await describe(images, file);
 			} catch (error) {
-				// No passthrough. What leaves this route is something the
-				// engine re-encoded, or nothing: the original of a file that
-				// failed to render is exactly the file nobody vetted.
 				if (isNotAnImage(error)) notFound();
 				else unprocessable();
 				return;
 			}
-		}
+			// No format asked for: re-encode into whatever the source IS — read
+			// from its content, never from its name.
+			let output = format;
+			if (output === undefined) {
+				if (!isEncodable(source.format)) {
+					unprocessable();
+					return;
+				}
+				output = source.format;
+			}
+			// The width the variant will really have. `inside` never enlarges, so
+			// 3200, 3840 and 5120 of a 3000px source are one image — and one
+			// render, not three.
+			const effectiveWidth = Math.min(
+				width,
+				settings.autoOrient ? source.orientedWidth : source.width,
+			);
 
-		ctx.response
-			.type(`image/${target}`)
-			.header("etag", etag)
-			// `immutable` because the key covers the source's mtime: an edited
-			// file produces a different key, so nothing a browser holds can
-			// ever be stale.
-			.header("cache-control", `public, max-age=${settings.maxAge}, immutable`)
-			.sendBuffer(bytes);
+			const key = variantKey({
+				path: file.path,
+				size: info.size,
+				mtimeMs: info.mtimeMs,
+				width: effectiveWidth,
+				format: output,
+				quality,
+			});
+			const etag = `"${key}"`;
+
+			// Answered before any read: a browser revalidating fifteen variants of
+			// one image should cost fifteen header comparisons.
+			if (ctx.request.header("if-none-match") === etag) {
+				ctx.response
+					.header("etag", etag)
+					.header("cache-control", `public, max-age=${settings.maxAge}`)
+					.status(304)
+					.sendBuffer(Buffer.alloc(0));
+				return;
+			}
+
+			const target = output;
+			const onDisk = diskSlot(
+				settings.cacheDir,
+				{ path: file.path, size: info.size, mtimeMs: info.mtimeMs },
+				key,
+			);
+			let bytes = memory?.get(key) ?? (await readCached(onDisk));
+			if (bytes === undefined) {
+				let work = inFlight.get(key);
+				if (work === undefined) {
+					const slot = gate.acquire();
+					if (slot === undefined) {
+						ctx.response.header("retry-after", "2");
+						fail(
+							503,
+							"E_PRISM_IMAGE_BUSY",
+							"too many images are being rendered; retry shortly",
+						);
+						return;
+					}
+					work = (async (): Promise<Buffer> => {
+						const release = await slot;
+						try {
+							const rendered = await render(
+								images,
+								await readSource(file),
+								effectiveWidth,
+								target,
+								quality,
+								settings.effort,
+							);
+							memory?.set(key, rendered);
+							await writeCached(onDisk, rendered);
+							return rendered;
+						} finally {
+							release();
+						}
+					})();
+					const settled = work.finally(() => inFlight.delete(key));
+					// Every waiter handles the rejection itself; this copy only
+					// clears the slot.
+					settled.catch(() => undefined);
+					inFlight.set(key, work);
+				}
+				try {
+					bytes = await work;
+				} catch (error) {
+					// No passthrough. What leaves this route is something the
+					// engine re-encoded, or nothing: the original of a file that
+					// failed to render is exactly the file nobody vetted.
+					if (isNotAnImage(error)) notFound();
+					else unprocessable();
+					return;
+				}
+			}
+
+			ctx.response
+				.type(`image/${target}`)
+				.header("etag", etag)
+				// `immutable` because the key covers the source's mtime: an edited
+				// file produces a different key, so nothing a browser holds can
+				// ever be stale.
+				.header(
+					"cache-control",
+					`public, max-age=${settings.maxAge}, immutable`,
+				)
+				.sendBuffer(bytes);
+		} finally {
+			await file.handle.close().catch(() => undefined);
+		}
 	});
 }
