@@ -23,6 +23,7 @@ fn output(format: ImageFormat) -> Output {
         quality: 82,
         background: Output::WHITE,
         depth: Output::DEPTH_8,
+        effort: encode::DEFAULT_EFFORT,
     }
 }
 
@@ -747,6 +748,7 @@ fn sixteen_bits_survive_into_the_formats_that_carry_them() {
         quality: 82,
         background: Output::WHITE,
         depth: Output::DEPTH_16,
+        effort: encode::DEFAULT_EFFORT,
     };
     let out = process(&png, &[], &deep, Limits::default(), true).expect("encodes");
     let decoded = image::load_from_memory(&out).expect("decodes");
@@ -769,6 +771,7 @@ fn asking_for_sixteen_bits_from_a_format_that_cannot_is_not_an_error() {
         quality: 82,
         background: Output::WHITE,
         depth: Output::DEPTH_16,
+        effort: encode::DEFAULT_EFFORT,
     };
     assert!(process(&png, &[], &deep, Limits::default(), true).is_ok());
 }
@@ -786,6 +789,7 @@ fn webp_is_lossy_by_default_and_lossless_on_request() {
             quality: 60,
             background: Output::WHITE,
             depth: Output::DEPTH_8,
+            effort: encode::DEFAULT_EFFORT,
         },
         Limits::default(),
         true,
@@ -799,6 +803,7 @@ fn webp_is_lossy_by_default_and_lossless_on_request() {
             quality: 100,
             background: Output::WHITE,
             depth: Output::DEPTH_8,
+            effort: encode::DEFAULT_EFFORT,
         },
         Limits::default(),
         true,
@@ -832,6 +837,7 @@ fn webp_quality_actually_moves_the_size() {
                 quality,
                 background: Output::WHITE,
                 depth: Output::DEPTH_8,
+                effort: encode::DEFAULT_EFFORT,
             },
             Limits::default(),
             true,
@@ -1126,4 +1132,57 @@ fn an_avif_that_is_not_one_is_unreadable_not_a_panic() {
     avif.truncate(length / 2);
     let error = inspect(&avif, avif_limits()).expect_err("refuses");
     assert_eq!(error.code(), "UNREADABLE");
+}
+
+#[test]
+fn avif_honours_the_requested_quality() {
+    // `write_to` used to pick speed 4 / quality 80 whatever was asked, so
+    // every quality produced the same bytes.
+    let png = fixture(96, 96, ImageFormat::Png);
+    let at = |quality: u8| {
+        process(
+            &png,
+            &[],
+            &Output {
+                quality,
+                ..output(ImageFormat::Avif)
+            },
+            Limits::default(),
+            true,
+        )
+        .expect("encodes")
+    };
+    let (low, high) = (at(10), at(90));
+    assert!(
+        low.len() < high.len(),
+        "q10 {} bytes, q90 {} bytes",
+        low.len(),
+        high.len()
+    );
+}
+
+#[test]
+fn avif_effort_changes_the_encoding() {
+    let png = fixture(96, 96, ImageFormat::Png);
+    let at = |effort: u8| {
+        process(
+            &png,
+            &[],
+            &Output {
+                effort,
+                ..output(ImageFormat::Avif)
+            },
+            Limits::default(),
+            true,
+        )
+        .expect("encodes")
+    };
+    let (fastest, default) = (at(0), at(encode::DEFAULT_EFFORT));
+    assert_ne!(fastest, default, "effort reaches the encoder");
+    let avif = Limits {
+        allowed: guard::FormatSet::from_names(["avif"]).expect("known"),
+        ..Limits::default()
+    };
+    let meta = inspect(&fastest, avif).expect("a valid AVIF");
+    assert_eq!((meta.width, meta.height), (96, 96));
 }

@@ -1,5 +1,6 @@
 //! Writing the result back out.
 
+use image::codecs::avif::AvifEncoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::codecs::webp::WebPEncoder;
@@ -24,6 +25,29 @@ pub fn encode(
     format: ImageFormat,
     quality: u8,
     depth: u8,
+) -> Result<Vec<u8>, EngineError> {
+    encode_with_effort(image, format, quality, depth, DEFAULT_EFFORT)
+}
+
+/// CPU effort when none is asked for: 0 is fastest, 9 slowest — sharp's
+/// scale and sharp's default.
+pub const DEFAULT_EFFORT: u8 = 4;
+
+/// Highest effort accepted.
+pub const MAX_EFFORT: u8 = 9;
+
+/// [`encode`], with the CPU effort an AVIF is encoded at.
+///
+/// AVIF is the one format here whose encoder trades minutes of CPU for bytes,
+/// so it is the one that takes the knob. Effort is sharp's 0 (fastest) to 9
+/// (slowest); `image`'s AVIF encoder counts speed the other way, 10 (fastest)
+/// to 1, so `speed = 10 - effort`.
+pub fn encode_with_effort(
+    image: &DynamicImage,
+    format: ImageFormat,
+    quality: u8,
+    depth: u8,
+    effort: u8,
 ) -> Result<Vec<u8>, EngineError> {
     let mut out = Vec::new();
     match format {
@@ -73,6 +97,20 @@ pub fn encode(
                 let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
                 out = encoder.encode(f32::from(quality.clamp(1, 100))).to_vec();
             }
+        }
+        ImageFormat::Avif => {
+            // Not the generic path: `write_to` builds `AvifEncoder::new`,
+            // which is speed 4 and quality 80 whatever was asked — the
+            // quality never reached the encoder.
+            let speed = 10 - effort.min(MAX_EFFORT);
+            let mut cursor = Cursor::new(&mut out);
+            DynamicImage::ImageRgba8(image.to_rgba8())
+                .write_with_encoder(AvifEncoder::new_with_speed_quality(
+                    &mut cursor,
+                    speed,
+                    quality.clamp(1, 100),
+                ))
+                .map_err(|error| EngineError::Encode(error.to_string()))?;
         }
         other => {
             // The generic path. Several of these accept only one colour type —

@@ -504,6 +504,52 @@ describe("defaults", () => {
 	});
 });
 
+describe("AVIF output", () => {
+	it("honours the requested quality", async () => {
+		// The generic encoder path wrote speed 4 / quality 80 whatever was
+		// asked: q10, q50 and q90 came out byte-identical.
+		const png = detailedPng(96, 96);
+		const q10 = await images.edit(png).toFormat("avif", 10);
+		const q50 = await images.edit(png).toFormat("avif", 50);
+		const q90 = await images.edit(png).toFormat("avif", 90);
+		expect(q10.length).toBeLessThan(q50.length);
+		expect(q50.length).toBeLessThan(q90.length);
+	});
+
+	it("takes an effort, sharp's 0 (fastest) to 9 (slowest)", async () => {
+		const png = detailedPng(96, 96);
+		const fastest = await images
+			.edit(png)
+			.toBuffer({ format: "avif", effort: 0 });
+		const usual = await images.edit(png).toBuffer({ format: "avif" });
+		expect(fastest.equals(usual)).toBe(false);
+		const avif = new Prism({ limits: { allowedFormats: ["avif"] } });
+		expect(avif.inspect(fastest)).toMatchObject({ width: 96, height: 96 });
+	});
+
+	it("refuses an effort or a quality that is not an integer in range", async () => {
+		const png = detailedPng(8, 8);
+		for (const effort of [-1, 10, 2.5, Number.NaN]) {
+			await expect(
+				images.edit(png).toBuffer({ format: "avif", effort }),
+				String(effort),
+			).rejects.toMatchObject({ code: "E_PRISM_INVALID_OPERATION" });
+		}
+		for (const quality of [
+			0,
+			101,
+			50.5,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+		]) {
+			await expect(
+				images.edit(png).toBuffer({ format: "jpeg", quality }),
+				String(quality),
+			).rejects.toMatchObject({ code: "E_PRISM_INVALID_OPERATION" });
+		}
+	});
+});
+
 describe("formats", () => {
 	/** A real GIF, produced by the engine with the allowlist widened. */
 	async function gif(): Promise<Buffer> {

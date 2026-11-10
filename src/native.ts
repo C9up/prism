@@ -88,6 +88,25 @@ function dimension(
 }
 
 /**
+ * An output option, refused unless it is an integer in range — sharp's rule.
+ * Clamped instead, `NaN` would reach the encoder as whatever napi makes of it.
+ */
+function integerIn(
+	name: string,
+	value: number | undefined,
+	low: number,
+	high: number,
+): number | undefined {
+	if (value === undefined) return undefined;
+	if (!Number.isInteger(value) || value < low || value > high) {
+		throw new Error(
+			`INVALID_OPERATION: ${name} must be an integer between ${low} and ${high}, got ${value}`,
+		);
+	}
+	return value;
+}
+
+/**
  * Flatten one operation for the boundary.
  *
  * Exhaustive by construction: the `kind` switch returns from every arm, so a
@@ -196,13 +215,14 @@ export async function processNative(
 	autoOrient?: boolean,
 ): Promise<Buffer> {
 	const loaded = engine();
-	const spec: JsOutput = {
-		format: output.format,
-		quality: output.quality,
-		background: output.background,
-		depth: output.depth,
-	};
 	try {
+		const spec: JsOutput = {
+			format: output.format,
+			quality: integerIn("quality", output.quality, 1, 100),
+			background: output.background,
+			depth: output.depth,
+			effort: integerIn("effort", output.effort, 0, 9),
+		};
 		return await loaded.process(
 			input,
 			operations.map(flatten),

@@ -122,6 +122,8 @@ pub struct Output {
     /// the encoder narrows it back, which is why this is a request rather
     /// than a guarantee.
     pub depth: u8,
+    /// CPU effort, 0 (fastest) to 9 (slowest). Only AVIF has the knob.
+    pub effort: u8,
 }
 
 impl Output {
@@ -304,5 +306,11 @@ pub fn process(
     if !encode::keeps_alpha(output.format) {
         image = flatten(image, output.background);
     }
-    encode::encode(&image, output.format, output.quality, output.depth)
+    encode::encode_with_effort(
+        &image,
+        output.format,
+        output.quality,
+        output.depth,
+        output.effort,
+    )
 }

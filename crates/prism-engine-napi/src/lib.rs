@@ -161,6 +161,9 @@ pub struct JsOutput {
     /// Bits per channel: 8 (default) or 16. Only PNG and TIFF carry 16;
     /// elsewhere the encoder narrows it back rather than refusing.
     pub depth: Option<u32>,
+    /// CPU effort, 0 (fastest) to 9 (slowest). Only AVIF has the knob.
+    /// Default 4.
+    pub effort: Option<u32>,
 }
 
 fn missing(kind: &str, field: &str) -> Error {
@@ -374,6 +377,16 @@ pub fn process(
         .into_iter()
         .map(operation_of)
         .collect::<Result<Vec<_>>>()?;
+    let effort = match output.effort {
+        None => prism_engine::encode::DEFAULT_EFFORT,
+        Some(effort) if effort <= u32::from(prism_engine::encode::MAX_EFFORT) => effort as u8,
+        Some(effort) => {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!("INVALID_OPERATION: effort must be between 0 and 9, got {effort}"),
+            ))
+        }
+    };
 
     Ok(AsyncTask::new(ProcessTask {
         input: input.to_vec(),
@@ -397,6 +410,7 @@ pub fn process(
                 // depth is narrowed rather than refused per format.
                 _ => Output::DEPTH_8,
             },
+            effort,
         },
         limits: limits_of(limits)?,
         auto_orient: auto_orient.unwrap_or(true),

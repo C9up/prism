@@ -103,6 +103,11 @@ export interface JsOutput {
 	 * elsewhere the encoder narrows it back rather than refusing.
 	 */
 	depth?: number;
+	/**
+	 * CPU effort, 0 (fastest) to 9 (slowest). Only AVIF has the knob.
+	 * Default 4.
+	 */
+	effort?: number;
 }
 
 /**

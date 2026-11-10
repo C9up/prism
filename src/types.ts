@@ -202,7 +202,7 @@ export interface Limits {
 
 export interface OutputOptions {
 	format: ImageFormat;
-	/** 1-100, for formats with a quality knob. Default 82. */
+	/** An integer 1-100, for formats with a quality knob. Default 82. */
 	quality?: number;
 	/**
 	 * What transparency is resolved against for a format with no alpha
@@ -221,6 +221,13 @@ export interface OutputOptions {
 	 * when its output format is switched.
 	 */
 	depth?: 8 | 16;
+	/**
+	 * CPU effort, an integer from 0 (fastest) to 9 (slowest). Default 4.
+	 *
+	 * Only AVIF has the knob: its encoder trades a great deal of CPU for a
+	 * few bytes, and an image encoded on request wants the fast end.
+	 */
+	effort?: number;
 }
 
 /** What an image is, read from its header. */
