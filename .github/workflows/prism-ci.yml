@@ -169,30 +169,105 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y meson ninja-build ${{ matrix.nasm && 'nasm' || '' }}
 
-      - name: Build tooling (macOS)
-        if: runner.os == 'macOS'
-        run: brew install meson ninja ${{ matrix.nasm && 'nasm' || '' }}
+      # macOS and Windows have no signed package manager to lean on the way
+      # apt is on Linux, and these programs compile the libdav1d that is linked
+      # INTO the published binary (pkg-config's output even becomes its linker
+      # flags). So nothing here is fetched by name and latest version: every
+      # file is named by version and checked against a SHA-256 recorded below,
+      # and a file that does not match stops the leg before anything runs it.
+      #
+      # * meson, ninja and (Windows only) pkg-config come from PyPI wheels, in
+      #   a venv, through `pip --require-hashes --only-binary=:all:`. PyPI
+      #   files are immutable once uploaded, so a recorded hash stays true.
+      #   pkg-config is the `pkgconf` wheel, which ships pkgconf's own binary
+      #   behind a `pkg-config` entry point. Linux and macOS images already
+      #   carry a pkg-config; Windows does not, and `dav1d-sys` needs one even
+      #   on the INTERNAL build path: it reads the flags of the dav1d it just
+      #   built out of `meson-private` by running pkg-config, and without it
+      #   the build script panics after a successful compile:
+      #     BuildInternalClosureError("dav1d", PkgConfig(... could not be found))
+      #   (It sets PKG_CONFIG_PATH to that directory itself, which is all the
+      #   wheel's pkgconf needs.)
+      # * nasm comes from nasm.us's own release zip. The win64 hash is the one
+      #   Scoop recorded for the same file when 2.16.03 came out; the macOS zip
+      #   (a universal i386/x86_64 binary, needed on the Intel leg only) was
+      #   recorded when this pin was set.
+      #
+      # Moving any of these is a deliberate edit of a version AND its hash.
+      - name: Build tooling (macOS, Windows), pinned by hash
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          NASM_VERSION: 2.16.03
+          NASM_WIN64_SHA256: 3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6
+          NASM_MACOSX_SHA256: 0d29bcd8a5fc617333f4549c7c1f93d1866a4a0915c40359e0a8585bb1a5aa75
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP"
+          # Git Bash on Windows: a POSIX path it can run, converted back to a
+          # Windows one on its way to python.exe.
+          if [ "$RUNNER_OS" = "Windows" ]; then tmp=$(cygpath -u "$RUNNER_TEMP"); fi
+          tools="$tmp/build-tools"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -m venv "$tools"
+            bin="$tools/Scripts"
+          else
+            python3 -m venv "$tools"
+            bin="$tools/bin"
+          fi
+          req="$tmp/build-tools.txt"
+          cat > "$req" <<'REQ'
+          meson==1.12.1 \
+              --hash=sha256:930bc7542cbd9f57009e182fd014eba48cf1a0180a7b9006d2d32d8f168d8b02
+          ninja==1.13.2 \
+              --hash=sha256:fd82e26c0706ad4ab88e5fdd26f3fab0a987a90f810160f6c322e752c6af298b \
+              --hash=sha256:1293f4078278b70d0ee4b6cc8f3a9e030656c9b2f59909970343c4fe76070118
+          REQ
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cat >> "$req" <<'REQ'
+          pkgconf==3.0.7.post0 \
+              --hash=sha256:e7906bb5ec1d0d074e397466075a8545f1c50cb11710768644f222ba8acebc7f
+          colorama==0.4.6 \
+              --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+          REQ
+          fi
+          "$bin/python" -m pip install --disable-pip-version-check --no-cache-dir \
+            --only-binary=:all: --require-hashes -r "$req"
 
-      - name: Build tooling (Windows)
+          if [ "${{ matrix.nasm }}" = "true" ]; then
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              zip="nasm-$NASM_VERSION-win64.zip"
+              url="https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/win64/$zip"
+              expected="$NASM_WIN64_SHA256"
+            else
+              zip="nasm-$NASM_VERSION-macosx.zip"
+              url="https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/macosx/$zip"
+              expected="$NASM_MACOSX_SHA256"
+            fi
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$zip" "$url"
+            actual=$("$bin/python" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$tmp/$zip")
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::$zip has SHA-256 $actual, expected $expected"
+              exit 1
+            fi
+            "$bin/python" -m zipfile -e "$tmp/$zip" "$tmp/nasm"
+            nasm_dir="$tmp/nasm/nasm-$NASM_VERSION"
+            if [ "$RUNNER_OS" != "Windows" ]; then chmod +x "$nasm_dir/nasm"; fi
+          fi
+
+          # Ahead of whatever the image already has on PATH.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cygpath -w "$bin" >> "$GITHUB_PATH"
+            if [ -n "${nasm_dir:-}" ]; then cygpath -w "$nasm_dir" >> "$GITHUB_PATH"; fi
+          else
+            echo "$bin" >> "$GITHUB_PATH"
+            if [ -n "${nasm_dir:-}" ]; then echo "$nasm_dir" >> "$GITHUB_PATH"; fi
+          fi
+
+      - name: MSVC as dav1d's compiler (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          python -m pip install --upgrade meson ninja
-          choco install nasm --no-progress -y
-          # choco drops nasm outside PATH for the current job.
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          # pkg-config, which Linux and macOS images already carry.
-          #
-          # `dav1d-sys` needs it even on the INTERNAL build path: it clones and
-          # builds dav1d with meson, then reads the resulting flags out of
-          # `meson-private` by running pkg-config. Without it the build script
-          # panics after a successful compile:
-          #   BuildInternalClosureError("dav1d", PkgConfig(... could not be found))
-          #
-          # `--allow-empty-checksums` because the pkgconfiglite package points at
-          # a SourceForge zip that is re-rolled in place, so its recorded
-          # checksum drifts and the install fails on a file that is fine.
-          choco install pkgconfiglite --no-progress -y --allow-empty-checksums
           # meson picks its OWN C compiler, and this image carries MinGW on
           # PATH. Left to itself it built libdav1d.a with GCC, whose objects
           # reference MinGW runtime symbols — `___chkstk_ms`, `__mingw_vfprintf`
@@ -218,6 +293,14 @@ jobs:
           # Checked rather than assumed, because dav1d-sys's build script does
           # not check: it spawns meson and ninja and ignores their exit codes,
           # so a missing one produces a silently wrong artefact, not an error.
+          # Which copy, too: on macOS and Windows it must be the hash-checked
+          # one, not one the image happened to carry earlier on PATH.
+          command -v meson ninja pkg-config
+          if [ "${{ matrix.nasm }}" = "true" ]; then command -v nasm; fi
+          if [ "${{ runner.os }}" != "Linux" ] && [ "$(meson --version)" != "1.12.1" ]; then
+            echo "::error::meson $(meson --version) is not the pinned 1.12.1"
+            exit 1
+          fi
           meson --version
           ninja --version
           # dav1d-sys shells out to this one too, to read back the flags of the
