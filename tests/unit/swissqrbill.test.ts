@@ -750,6 +750,31 @@ describe("prism > swissqrbill validation", () => {
 		expect(Reflect.get(ours, "code")).toBe(Reflect.get(theirs, "code"));
 	});
 
+	it.each<[string, number]>([
+		["NaN", Number.NaN],
+		["Infinity", Number.POSITIVE_INFINITY],
+		["a negative amount", -1],
+		["zero", 0],
+		["an amount that rounds to zero", 0.004],
+	])("refuses %s, which upstream writes into the payload", (_, amount) => {
+		// The Swiss Payments Code's amount is 0.01 to 999999999.99: upstream
+		// only checks the length of `toFixed(2)`, so "NaN", "Infinity" and
+		// "-1.00" reach line 18 of the code.
+		const data: Data = { ...valid, amount };
+		for (const build of [() => new PDFBill(data), () => new SVGBill(data)]) {
+			const error = thrown(build);
+			expect(error).toBeInstanceOf(ValidationError);
+			expect(Reflect.get(error, "code")).toBe("AMOUNT_VALUE_IS_INVALID");
+		}
+	});
+
+	it("takes the amounts at both ends of the range", () => {
+		for (const amount of [0.01, 999_999_999.99]) {
+			const svg = new SVGBill({ ...valid, amount }).toString();
+			expect(svg).toContain(utils.formatAmount(amount));
+		}
+	});
+
 	it("cleans as upstream does: spaces and case in the account, line breaks anywhere", () => {
 		const data: Data = {
 			...valid,

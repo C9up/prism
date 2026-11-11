@@ -23,6 +23,8 @@ export const ValidationErrors = {
 	ALTERNATIVE_SCHEME_TYPE_IS_INVALID: "{scheme} must be a string.",
 	AMOUNT_LENGTH_IS_INVALID: "Amount must be a maximum of 12 digits.",
 	AMOUNT_TYPE_IS_INVALID: "Amount must be a number.",
+	// Ours: upstream has no range check (see validator.ts).
+	AMOUNT_VALUE_IS_INVALID: "Amount must be between 0.01 and 999999999.99.",
 	CREDITOR_ACCOUNT_COUNTRY_IS_INVALID:
 		"Only CH and LI IBAN numbers are allowed.",
 	CREDITOR_ACCOUNT_IS_INVALID:

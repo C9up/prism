@@ -16,6 +16,10 @@ import {
 
 type Party = "CREDITOR" | "DEBTOR";
 
+/** The Swiss Payments Code's amount range, in francs or euros. */
+const AMOUNT_MIN = 0.01;
+const AMOUNT_MAX = 999_999_999.99;
+
 function isText(value: unknown): value is string | number {
 	return typeof value === "string" || typeof value === "number";
 }
@@ -146,8 +150,17 @@ export function validateData(data: Data): void {
 		if (typeof data.amount !== "number") {
 			throw new ValidationError("AMOUNT_TYPE_IS_INVALID");
 		}
-		if (data.amount.toFixed(2).length > 12) {
+		const written = data.amount.toFixed(2);
+		if (written.length > 12) {
 			throw new ValidationError("AMOUNT_LENGTH_IS_INVALID");
+		}
+		// NAMED DEVIATION: swissqrbill checks only the length above, so NaN,
+		// Infinity and negative amounts reach the payload as "NaN",
+		// "Infinity" and "-1.00". The Swiss Payments Code's amount is 0.01 to
+		// 999999999.99, checked on the value as it is written, two decimals.
+		const value = Number(written);
+		if (!Number.isFinite(value) || value < AMOUNT_MIN || value > AMOUNT_MAX) {
+			throw new ValidationError("AMOUNT_VALUE_IS_INVALID");
 		}
 	}
 	if (data.currency === undefined) {
