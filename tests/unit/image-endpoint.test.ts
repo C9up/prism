@@ -633,7 +633,30 @@ describe("what never leaves the route", () => {
 		const spy = vi.spyOn(small, "inspect");
 		const answer = await request({ src: "photo.png", w: "400" });
 		expect(answer.status).toBe(422);
-		expect(spy).not.toHaveBeenCalled();
+		// Only the signature is looked at, never the whole file.
+		for (const [bytes] of spy.mock.calls) {
+			expect(bytes.length).toBeLessThanOrEqual(100);
+		}
+	});
+
+	it("answers a non-image over the byte limit like a missing file", async () => {
+		// Otherwise its size alone tells a caller the file is there: a
+		// non-image under the limit is a 404, so one over it must be too.
+		const zip = Buffer.concat([
+			Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+			Buffer.alloc(400, 1),
+		]);
+		const { dir } = await root({ "backup.zip": zip });
+		const small = new Prism({ limits: { maxBytes: 100 } });
+		const request = mount({ roots: [dir], widths: [16] }, small);
+		const spy = vi.spyOn(small, "inspect");
+		const big = await request({ src: "backup.zip", w: "16" });
+		const missing = await request({ src: "absent.zip", w: "16" });
+		expect(big.status).toBe(404);
+		expect(big.json).toEqual(missing.json);
+		for (const [bytes] of spy.mock.calls) {
+			expect(bytes.length).toBeLessThanOrEqual(100);
+		}
 	});
 
 	it("labels the bytes with the format the engine wrote, never the file's name", async () => {

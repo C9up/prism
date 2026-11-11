@@ -435,6 +435,32 @@ async function readSource(source: OpenedSource): Promise<Buffer> {
 }
 
 /**
+ * How much of a source its format is identified from. Every signature the
+ * engine recognises sits in the first few dozen bytes.
+ */
+const SIGNATURE_BYTES = 64;
+
+/**
+ * Whether the first bytes of a source identify it as an image, for a source
+ * too large to read whole. Anything but "this is not an image" counts as one:
+ * a truncated header, a format the application does not allow.
+ */
+async function isSignedAsImage(
+	images: Prism,
+	source: OpenedSource,
+	maxBytes: number,
+): Promise<boolean> {
+	const head = Buffer.alloc(Math.min(SIGNATURE_BYTES, maxBytes));
+	const { bytesRead } = await source.handle.read(head, 0, head.length, 0);
+	try {
+		images.inspect(head.subarray(0, bytesRead));
+	} catch (error) {
+		return !isNotAnImage(error);
+	}
+	return true;
+}
+
+/**
  * The identity of a rendered variant.
  *
  * Includes the source's size and mtime so replacing a file on disk invalidates
@@ -736,9 +762,16 @@ export function registerImageRoute(
 		try {
 			const info = file.info;
 			// Refused before reading: the engine would refuse it anyway, after
-			// the whole file had been pulled into memory.
+			// the whole file had been pulled into memory. Its signature is
+			// still read first, because a non-image is answered like a missing
+			// file whatever its size — a 422 for a large one alone would tell
+			// a caller it is there.
 			if (info.size > settings.maxBytes) {
-				unprocessable();
+				if (await isSignedAsImage(images, file, settings.maxBytes)) {
+					unprocessable();
+				} else {
+					notFound();
+				}
 				return;
 			}
 
