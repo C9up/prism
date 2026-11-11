@@ -25,7 +25,10 @@ export function clearPrism(): void {
 	instance = undefined;
 }
 
-const images: Prism = new Proxy({} as Prism, {
+// The target is never read through — every trap forwards to `instance`.
+const target: Prism = Object.create(null);
+
+const images: Prism = new Proxy(target, {
 	get(_target, prop) {
 		// A module loader inspects what it imports before anyone uses it: it
 		// reads `then` to decide whether the namespace is thenable, and various
@@ -38,7 +41,7 @@ const images: Prism = new Proxy({} as Prism, {
 					"or `setPrism(myPrism)` was called. Wire one of them first.",
 			);
 		}
-		const value = Reflect.get(instance, prop);
+		const value = Reflect.get(instance, prop, instance);
 		return typeof value === "function" ? value.bind(instance) : value;
 	},
 });
