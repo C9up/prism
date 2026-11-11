@@ -110,7 +110,8 @@ export interface SharpenOptions {
 	/** Radius. 0-100. */
 	sigma: number;
 	/**
-	 * Contrast step below which nothing is sharpened. Default 0.
+	 * Contrast step below which nothing is sharpened, a whole number from 0
+	 * to 65535. Default 0.
 	 *
 	 * Raising it is what stops an unsharp mask amplifying sensor noise in
 	 * flat areas — a clear sky is the usual casualty.

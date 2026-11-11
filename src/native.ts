@@ -106,8 +106,8 @@ function dimension(
 }
 
 /**
- * An output option, refused unless it is an integer in range — sharp's rule.
- * Clamped instead, `NaN` would reach the encoder as whatever napi makes of it.
+ * An option, refused unless it is an integer in range — sharp's rule.
+ * Clamped instead, `NaN` would reach the engine as whatever napi makes of it.
  */
 function integerIn(
 	name: string,
@@ -123,6 +123,12 @@ function integerIn(
 	}
 	return value;
 }
+
+/**
+ * The largest contrast step a sharpen threshold can mean: a 16-bit channel's
+ * full range. Anything above it sharpens nothing.
+ */
+const SHARPEN_THRESHOLD_MAX = 65_535;
 
 /**
  * Flatten one operation for the boundary.
@@ -149,7 +155,17 @@ function flatten(operation: Operation): JsOperation {
 				height: dimension("crop", "height", operation.height),
 			};
 		case "rotate":
-			return { kind: "rotate", degrees: operation.degrees };
+			return {
+				kind: "rotate",
+				// Any whole number: the engine normalises it and refuses one
+				// that is not a right angle.
+				degrees: integerIn(
+					"rotate.degrees",
+					operation.degrees,
+					-0x8000_0000,
+					0x7fff_ffff,
+				),
+			};
 		case "flip":
 			return { kind: "flip", axis: operation.axis };
 		case "composite":
@@ -185,7 +201,12 @@ function flatten(operation: Operation): JsOperation {
 			return {
 				kind: "sharpen",
 				sigma: operation.sigma,
-				threshold: operation.threshold,
+				threshold: integerIn(
+					"sharpen.threshold",
+					operation.threshold,
+					0,
+					SHARPEN_THRESHOLD_MAX,
+				),
 			};
 		case "brighten":
 			return { kind: "brighten", value: operation.value };

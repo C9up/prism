@@ -61,6 +61,11 @@ export interface JsOperation {
 	fit?: string;
 	x?: number;
 	y?: number;
+	/**
+	 * `f64`, not `i32`: napi converts to an `i32` by truncating the fraction
+	 * and keeping the low 32 bits, so `2^32 + 90` would arrive as 90. Checked
+	 * back into an `i32` in `operation_of`.
+	 */
 	degrees?: number;
 	axis?: string;
 	image?: Buffer;
@@ -73,7 +78,8 @@ export interface JsOperation {
 	sigma?: number;
 	/**
 	 * Sharpen: contrast step below which nothing is sharpened, so flat areas
-	 * like sky do not have their sensor noise amplified.
+	 * like sky do not have their sensor noise amplified. `f64` for the same
+	 * reason as `degrees`.
 	 */
 	threshold?: number;
 	/** Brighten (-255..255), contrast (-255..255) and hue rotation (degrees). */

@@ -162,6 +162,31 @@ describe("guards", () => {
 		}
 	});
 
+	it("refuses a rotation or a sharpen threshold napi would truncate or wrap", async () => {
+		// Carried as an i32, 2^32 + 90 arrived as 90 and 450.7 as 450: both
+		// rotated, and a threshold of 2^32 + 5 sharpened at 5.
+		const tiny = await fixture(4, 4);
+		for (const degrees of [
+			2 ** 32 + 90,
+			2 ** 32 + 45,
+			450.7,
+			-(2 ** 31) - 90,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+		]) {
+			await expect(
+				images.edit(tiny).rotate(degrees).toFormat("png"),
+				String(degrees),
+			).rejects.toMatchObject({ code: "E_PRISM_INVALID_OPERATION" });
+		}
+		for (const threshold of [2 ** 32 + 5, 5.5, -1, 65_536, Number.NaN]) {
+			await expect(
+				images.edit(tiny).sharpen({ sigma: 1, threshold }).toFormat("png"),
+				String(threshold),
+			).rejects.toMatchObject({ code: "E_PRISM_INVALID_OPERATION" });
+		}
+	});
+
 	it("refuses an AVIF bomb from its headers, without decoding it on the event loop", async () => {
 		// 1683 bytes declaring 16000x16000. `inspect` is synchronous: it used
 		// to decode the frame to learn its size — a gigabyte and a third of

@@ -130,7 +130,10 @@ pub struct JsOperation {
     pub fit: Option<String>,
     pub x: Option<i64>,
     pub y: Option<i64>,
-    pub degrees: Option<i32>,
+    /// `f64`, not `i32`: napi converts to an `i32` by truncating the fraction
+    /// and keeping the low 32 bits, so `2^32 + 90` would arrive as 90. Checked
+    /// back into an `i32` in `operation_of`.
+    pub degrees: Option<f64>,
     pub axis: Option<String>,
     pub image: Option<Buffer>,
     pub opacity: Option<f64>,
@@ -141,8 +144,9 @@ pub struct JsOperation {
     /// Blur / sharpen radius.
     pub sigma: Option<f64>,
     /// Sharpen: contrast step below which nothing is sharpened, so flat areas
-    /// like sky do not have their sensor noise amplified.
-    pub threshold: Option<i32>,
+    /// like sky do not have their sensor noise amplified. `f64` for the same
+    /// reason as `degrees`.
+    pub threshold: Option<f64>,
     /// Brighten (-255..255), contrast (-255..255) and hue rotation (degrees).
     pub value: Option<f64>,
     /// `thumbnail`: ignore the aspect ratio, as `fit: "fill"` does.
@@ -189,6 +193,29 @@ fn non_negative(kind: &str, field: &str, value: i64) -> Result<u32> {
     Ok(value as u32)
 }
 
+/// A whole number JavaScript sent as a double, refused unless it is one and
+/// in `low..=high`.
+fn whole(kind: &str, field: &str, value: f64, low: i32, high: i32) -> Result<i32> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value < f64::from(low)
+        || value > f64::from(high)
+    {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "INVALID_OPERATION: \"{kind}\".{field} must be a whole number between {low} and {high}, got {value}"
+            ),
+        ));
+    }
+    // Exact: integral and inside the i32 range, both checked above.
+    Ok(value as i32)
+}
+
+/// The largest contrast step a sharpen threshold can mean: a 16-bit channel's
+/// full range.
+const SHARPEN_THRESHOLD_MAX: i32 = 65_535;
+
 /// Rebuild the engine's enum, refusing anything the flat shape allows but the
 /// operation does not.
 fn operation_of(op: JsOperation) -> Result<Operation> {
@@ -213,9 +240,13 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
             width: op.width.ok_or_else(|| missing("crop", "width"))?,
             height: op.height.ok_or_else(|| missing("crop", "height"))?,
         }),
-        "rotate" => Ok(Operation::Rotate(
+        "rotate" => Ok(Operation::Rotate(whole(
+            "rotate",
+            "degrees",
             op.degrees.ok_or_else(|| missing("rotate", "degrees"))?,
-        )),
+            i32::MIN,
+            i32::MAX,
+        )?)),
         "flip" => Ok(Operation::Flip(
             op.axis.ok_or_else(|| missing("flip", "axis"))?,
         )),
@@ -272,7 +303,10 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
             sigma: op.sigma.ok_or_else(|| missing("sharpen", "sigma"))? as f32,
             // Zero, not a guess: no threshold means sharpen everything, which
             // is what an unqualified "sharpen" asks for.
-            threshold: op.threshold.unwrap_or(0),
+            threshold: match op.threshold {
+                Some(value) => whole("sharpen", "threshold", value, 0, SHARPEN_THRESHOLD_MAX)?,
+                None => 0,
+            },
         }),
         "brighten" => Ok(Operation::Brighten(
             op.value.ok_or_else(|| missing("brighten", "value"))? as i32,
@@ -645,4 +679,90 @@ pub fn qr_swiss_matrix(payload: String) -> Result<JsQrMatrix> {
 #[napi]
 pub fn opened_path(fd: i32) -> Option<String> {
     opened::path_of(fd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operation(kind: &str) -> JsOperation {
+        JsOperation {
+            kind: kind.to_string(),
+            width: None,
+            height: None,
+            fit: None,
+            x: None,
+            y: None,
+            degrees: None,
+            axis: None,
+            image: None,
+            opacity: None,
+            text: None,
+            font: None,
+            size: None,
+            color: None,
+            sigma: None,
+            threshold: None,
+            value: None,
+            exact: None,
+            kernel: None,
+            to: None,
+            from: None,
+        }
+    }
+
+    fn rotate(degrees: f64) -> Result<Operation> {
+        operation_of(JsOperation {
+            degrees: Some(degrees),
+            ..operation("rotate")
+        })
+    }
+
+    fn sharpen(threshold: f64) -> Result<Operation> {
+        operation_of(JsOperation {
+            sigma: Some(1.0),
+            threshold: Some(threshold),
+            ..operation("sharpen")
+        })
+    }
+
+    #[test]
+    fn a_rotation_is_refused_rather_than_truncated_or_wrapped() {
+        for degrees in [
+            4_294_967_386.0,
+            4_294_967_341.0,
+            450.7,
+            -2_147_483_738.0,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            let error = rotate(degrees).expect_err(&degrees.to_string());
+            assert!(
+                error.reason.starts_with("INVALID_OPERATION:"),
+                "{}",
+                error.reason
+            );
+        }
+        assert!(matches!(rotate(-270.0), Ok(Operation::Rotate(-270))));
+        assert!(matches!(
+            rotate(f64::from(i32::MAX)),
+            Ok(Operation::Rotate(i32::MAX))
+        ));
+    }
+
+    #[test]
+    fn a_sharpen_threshold_is_refused_rather_than_truncated_or_wrapped() {
+        for threshold in [4_294_967_301.0, 5.5, -1.0, 65_536.0, f64::NAN] {
+            let error = sharpen(threshold).expect_err(&threshold.to_string());
+            assert!(
+                error.reason.starts_with("INVALID_OPERATION:"),
+                "{}",
+                error.reason
+            );
+        }
+        assert!(matches!(
+            sharpen(5.0),
+            Ok(Operation::Sharpen { threshold: 5, .. })
+        ));
+    }
 }
