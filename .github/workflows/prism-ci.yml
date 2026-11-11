@@ -50,6 +50,14 @@ concurrency:
 #   So every leg below sets it, and a gate after the build refuses an artefact
 #   that mentions dav1d or webp in its dynamic dependencies.
 #
+#   That clone is by TAG, and the build script checks nothing about what it
+#   got: a moved tag would be compiled into every published binary. So every
+#   leg first runs `scripts/dav1d-source.mjs fetch`, which fetches the tag
+#   into a local repository, refuses it unless it is the pinned commit, and
+#   points the build script's clone at that repository; after the build,
+#   `verify` refuses unless every dav1d checkout the build left is that
+#   commit.
+#
 #   **`always`, not `auto`.** `auto` builds internally only when pkg-config
 #   finds nothing — and a runner image that happens to ship libdav1d would then
 #   silently produce the un-shippable artefact. The failure mode is invisible
@@ -311,6 +319,10 @@ jobs:
           # that link.exe can work with, not the MinGW gcc also on PATH.
           if [ "${{ runner.os }}" = "Windows" ]; then cl 2>&1 | head -1; fi
 
+      - name: dav1d source, pinned by commit
+        shell: bash
+        run: node scripts/dav1d-source.mjs fetch "$RUNNER_TEMP/dav1d.git"
+
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -328,6 +340,10 @@ jobs:
 
       - name: Build NAPI binary
         run: pnpm build:napi
+
+      - name: The dav1d compiled in is the pinned commit
+        shell: bash
+        run: node scripts/dav1d-source.mjs verify target
 
       - name: The artefact must carry its own dav1d
         if: runner.os != 'Windows'
@@ -375,7 +391,9 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build nasm
+      - run: node scripts/dav1d-source.mjs fetch "$RUNNER_TEMP/dav1d.git"
       - run: cargo test --locked --workspace --all-features
+      - run: node scripts/dav1d-source.mjs verify target
 
   # vitest on the host platform, on every push. The matrix above runs the same
   # suite across five targets, but only when the version moves — so without
@@ -397,8 +415,10 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build nasm
+      - run: node scripts/dav1d-source.mjs fetch "$RUNNER_TEMP/dav1d.git"
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build:napi
+      - run: node scripts/dav1d-source.mjs verify target
       # With coverage: the thresholds in vitest.config.ts are only a gate if
       # something runs them.
       - run: pnpm exec vitest run --coverage
