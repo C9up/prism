@@ -318,7 +318,10 @@ jobs:
       # clippy as an error rather than a note: this crate decodes files it did
       # not write, and the lints that catch a panic on hostile input are worth
       # more here than the ones that catch a style.
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `--locked` here, in `cargo test` and in `build:napi`: a Cargo.toml that
+      # drifted from Cargo.lock fails the release instead of being re-resolved
+      # on five runners into a dependency set the repository never recorded.
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -372,7 +375,7 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build nasm
-      - run: cargo test --workspace --all-features
+      - run: cargo test --locked --workspace --all-features
 
   # vitest on the host platform, on every push. The matrix above runs the same
   # suite across five targets, but only when the version moves — so without
