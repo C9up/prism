@@ -91,7 +91,11 @@ function fetch(directory) {
 	}
 }
 
-/** The dav1d checkouts dav1d-sys left: <profile>/build/dav1d-sys-* /out/dav1d. */
+/**
+ * The dav1d checkouts dav1d-sys left. Cargo has laid build scripts out two
+ * ways: <profile>/build/dav1d-sys-<hash>/out/dav1d, and since the build-dir
+ * layout change <profile>/build/dav1d-sys/<hash>/out/dav1d.
+ */
 function checkouts(target) {
 	const found = [];
 	const visit = (directory, depth) => {
@@ -101,6 +105,11 @@ function checkouts(target) {
 			if (name.startsWith("dav1d-sys-") && directory.endsWith("build")) {
 				const source = join(path, "out", "dav1d");
 				if (existsSync(source)) found.push(source);
+			} else if (name === "dav1d-sys" && directory.endsWith("build")) {
+				for (const hash of readdirSync(path)) {
+					const source = join(path, hash, "out", "dav1d");
+					if (existsSync(source)) found.push(source);
+				}
 			} else if (depth > 0 && name !== "deps" && name !== "incremental") {
 				visit(path, depth - 1);
 			}
