@@ -284,11 +284,16 @@ fn finite(name: &str, value: f32) -> Result<f32, EngineError> {
     Ok(value)
 }
 
+/// A radius in `0..=MAX_SIGMA` that `image` accepts.
+///
+/// `image` asserts a Gaussian sigma is a normal float, so a subnormal one —
+/// finite and in range — panicked inside it. Zero is the one non-normal value
+/// it takes (a blur reads it as its own default radius).
 fn sigma(value: f32) -> Result<f32, EngineError> {
     let value = finite("sigma", value)?;
-    if !(0.0..=MAX_SIGMA).contains(&value) {
+    if !(0.0..=MAX_SIGMA).contains(&value) || (value != 0.0 && !value.is_normal()) {
         return Err(EngineError::Geometry(format!(
-            "sigma must be between 0 and {MAX_SIGMA}, got {value}"
+            "sigma must be 0 or a normal number up to {MAX_SIGMA}, got {value}"
         )));
     }
     Ok(value)
@@ -297,6 +302,17 @@ fn sigma(value: f32) -> Result<f32, EngineError> {
 /// Gaussian blur. Accurate and slow; see [`fast_blur`] for the cheap one.
 pub fn blur(image: DynamicImage, amount: f32) -> Result<DynamicImage, EngineError> {
     Ok(image.blur(sigma(amount)?))
+}
+
+/// A composite's opacity, `0..=1`.
+pub fn opacity(value: f32) -> Result<f32, EngineError> {
+    let value = finite("opacity", value)?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(EngineError::Geometry(format!(
+            "opacity must be between 0 and 1, got {value}"
+        )));
+    }
+    Ok(value)
 }
 
 /// Box-approximated blur — visually close to Gaussian, far cheaper.
@@ -311,7 +327,14 @@ pub fn sharpen(
     amount: f32,
     threshold: i32,
 ) -> Result<DynamicImage, EngineError> {
-    Ok(image.unsharpen(sigma(amount)?, threshold))
+    // Unlike `blur`, `unsharpen` hands zero straight to the assertion.
+    let amount = sigma(amount)?;
+    if amount == 0.0 {
+        return Err(EngineError::Geometry(
+            "sharpen sigma must be greater than 0".into(),
+        ));
+    }
+    Ok(image.unsharpen(amount, threshold))
 }
 
 /// Additive brightness, -255 to 255.

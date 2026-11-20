@@ -547,6 +547,75 @@ fn an_unbounded_blur_is_refused_rather_than_run() {
 }
 
 #[test]
+fn a_sigma_image_would_assert_on_is_refused_before_it_reaches_image() {
+    // `image` asserts a Gaussian sigma is normal: a subnormal one panicked
+    // inside it, and so does an unsharp mask of radius zero.
+    let subnormal = f32::from_bits(1);
+    let refusals = [
+        Operation::Blur(subnormal),
+        Operation::FastBlur(subnormal),
+        Operation::Sharpen {
+            sigma: subnormal,
+            threshold: 0,
+        },
+        Operation::Sharpen {
+            sigma: 0.0,
+            threshold: 0,
+        },
+    ];
+    for op in refusals {
+        let label = format!("{op:?}");
+        assert_eq!(
+            process(
+                &fixture(8, 8, ImageFormat::Png),
+                &[op],
+                &output(ImageFormat::Png),
+                Limits::default(),
+                true,
+            )
+            .expect_err(&label)
+            .code(),
+            "INVALID_GEOMETRY",
+            "for {label}"
+        );
+    }
+    // Zero is still a blur: `image` reads it as its own default radius.
+    process(
+        &fixture(8, 8, ImageFormat::Png),
+        &[Operation::Blur(0.0)],
+        &output(ImageFormat::Png),
+        Limits::default(),
+        true,
+    )
+    .expect("a zero blur runs");
+}
+
+#[test]
+fn a_composite_opacity_that_is_not_in_zero_to_one_is_refused() {
+    let overlay = fixture(2, 2, ImageFormat::Png);
+    for opacity in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+        assert_eq!(
+            process(
+                &fixture(8, 8, ImageFormat::Png),
+                &[Operation::Composite {
+                    image: overlay.clone(),
+                    x: 0,
+                    y: 0,
+                    opacity,
+                }],
+                &output(ImageFormat::Png),
+                Limits::default(),
+                true,
+            )
+            .expect_err("refuses")
+            .code(),
+            "INVALID_GEOMETRY",
+            "for opacity {opacity}"
+        );
+    }
+}
+
+#[test]
 fn brightness_and_contrast_are_bounded() {
     for op in [Operation::Brighten(9_000), Operation::Contrast(9_000.0)] {
         assert_eq!(

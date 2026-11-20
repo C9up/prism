@@ -187,6 +187,64 @@ describe("guards", () => {
 		}
 	});
 
+	it("refuses every numeric knob napi would coerce, rather than applying another value", async () => {
+		// NaN arrived as 0 (a silent no-op), 2.9 as 2, and a NaN opacity faded
+		// the overlay to nothing.
+		const tiny = await fixture(4, 4);
+		const refusals: [string, () => Promise<Buffer>][] = [
+			[
+				"brighten NaN",
+				() => images.edit(tiny).brighten(Number.NaN).toFormat("png"),
+			],
+			["brighten 2.9", () => images.edit(tiny).brighten(2.9).toFormat("png")],
+			[
+				"hueRotate NaN",
+				() => images.edit(tiny).hueRotate(Number.NaN).toFormat("png"),
+			],
+			["hueRotate 2.9", () => images.edit(tiny).hueRotate(2.9).toFormat("png")],
+			[
+				"opacity NaN",
+				() =>
+					images
+						.edit(tiny)
+						.composite({ image: tiny, opacity: Number.NaN })
+						.toFormat("png"),
+			],
+			[
+				"contrast 1e300",
+				() => images.edit(tiny).contrast(1e300).toFormat("png"),
+			],
+			["blur 1e300", () => images.edit(tiny).blur(1e300).toFormat("png")],
+		];
+		for (const [label, run] of refusals) {
+			await expect(run(), label).rejects.toMatchObject({
+				code: "E_PRISM_INVALID_OPERATION",
+			});
+		}
+	});
+
+	it("refuses a sigma image would assert on, without a panic", async () => {
+		// 1e-40 is finite and in range, and a subnormal f32: `image` asserted
+		// on it and the call came back as E_PRISM_INTERNAL_PANIC.
+		const tiny = await fixture(4, 4);
+		const refusals: [string, () => Promise<Buffer>][] = [
+			["blur 1e-40", () => images.edit(tiny).blur(1e-40).toFormat("png")],
+			[
+				"sharpen 1e-40",
+				() => images.edit(tiny).sharpen({ sigma: 1e-40 }).toFormat("png"),
+			],
+			[
+				"sharpen 0",
+				() => images.edit(tiny).sharpen({ sigma: 0 }).toFormat("png"),
+			],
+		];
+		for (const [label, run] of refusals) {
+			await expect(run(), label).rejects.toMatchObject({
+				code: "E_PRISM_INVALID_GEOMETRY",
+			});
+		}
+	});
+
 	it("refuses an AVIF bomb from its headers, without decoding it on the event loop", async () => {
 		// 1683 bytes declaring 16000x16000. `inspect` is synchronous: it used
 		// to decode the frame to learn its size — a gigabyte and a third of

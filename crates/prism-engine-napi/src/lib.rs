@@ -212,6 +212,31 @@ fn whole(kind: &str, field: &str, value: f64, low: i32, high: i32) -> Result<i32
     Ok(value as i32)
 }
 
+/// A real number JavaScript sent as a double, refused unless it is finite,
+/// in `low..=high`, and still finite once narrowed to the engine's `f32`.
+///
+/// A plain `as f32` turned NaN into a silent no-op (a composite whose every
+/// alpha became zero) and 1e300 into infinity.
+fn real(kind: &str, field: &str, value: f64, low: f64, high: f64) -> Result<f32> {
+    // Narrowed on purpose: the engine works in f32, and the result is
+    // checked below rather than trusted.
+    let narrowed = value as f32;
+    if !value.is_finite() || !narrowed.is_finite() || value < low || value > high {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "INVALID_OPERATION: \"{kind}\".{field} must be a finite number between {low} and {high}, got {value}"
+            ),
+        ));
+    }
+    Ok(narrowed)
+}
+
+/// Any finite `f32`: the engine applies the field's own range.
+fn any_real(kind: &str, field: &str, value: f64) -> Result<f32> {
+    real(kind, field, value, f64::from(f32::MIN), f64::from(f32::MAX))
+}
+
 /// The largest contrast step a sharpen threshold can mean: a 16-bit channel's
 /// full range.
 const SHARPEN_THRESHOLD_MAX: i32 = 65_535;
@@ -257,7 +282,7 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
                 .to_vec(),
             x: op.x.unwrap_or(0),
             y: op.y.unwrap_or(0),
-            opacity: op.opacity.unwrap_or(1.0) as f32,
+            opacity: real("composite", "opacity", op.opacity.unwrap_or(1.0), 0.0, 1.0)?,
         }),
         "watermarkText" => {
             let colour = op.color.unwrap_or(JsColour {
@@ -272,7 +297,7 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
                     .font
                     .ok_or_else(|| missing("watermarkText", "font"))?
                     .to_vec(),
-                size: op.size.unwrap_or(32.0) as f32,
+                size: any_real("watermarkText", "size", op.size.unwrap_or(32.0))?,
                 colour: Colour {
                     r: colour.r.min(255) as u8,
                     g: colour.g.min(255) as u8,
@@ -293,14 +318,22 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
                 exact: op.exact.unwrap_or(false),
             })
         }
-        "blur" => Ok(Operation::Blur(
-            op.sigma.ok_or_else(|| missing("blur", "sigma"))? as f32,
-        )),
-        "fastBlur" => Ok(Operation::FastBlur(
-            op.sigma.ok_or_else(|| missing("fastBlur", "sigma"))? as f32,
-        )),
+        "blur" => Ok(Operation::Blur(any_real(
+            "blur",
+            "sigma",
+            op.sigma.ok_or_else(|| missing("blur", "sigma"))?,
+        )?)),
+        "fastBlur" => Ok(Operation::FastBlur(any_real(
+            "fastBlur",
+            "sigma",
+            op.sigma.ok_or_else(|| missing("fastBlur", "sigma"))?,
+        )?)),
         "sharpen" => Ok(Operation::Sharpen {
-            sigma: op.sigma.ok_or_else(|| missing("sharpen", "sigma"))? as f32,
+            sigma: any_real(
+                "sharpen",
+                "sigma",
+                op.sigma.ok_or_else(|| missing("sharpen", "sigma"))?,
+            )?,
             // Zero, not a guess: no threshold means sharpen everything, which
             // is what an unqualified "sharpen" asks for.
             threshold: match op.threshold {
@@ -308,15 +341,25 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
                 None => 0,
             },
         }),
-        "brighten" => Ok(Operation::Brighten(
-            op.value.ok_or_else(|| missing("brighten", "value"))? as i32,
-        )),
-        "contrast" => Ok(Operation::Contrast(
-            op.value.ok_or_else(|| missing("contrast", "value"))? as f32,
-        )),
-        "hueRotate" => Ok(Operation::HueRotate(
-            op.value.ok_or_else(|| missing("hueRotate", "value"))? as i32,
-        )),
+        "brighten" => Ok(Operation::Brighten(whole(
+            "brighten",
+            "value",
+            op.value.ok_or_else(|| missing("brighten", "value"))?,
+            i32::MIN,
+            i32::MAX,
+        )?)),
+        "contrast" => Ok(Operation::Contrast(any_real(
+            "contrast",
+            "value",
+            op.value.ok_or_else(|| missing("contrast", "value"))?,
+        )?)),
+        "hueRotate" => Ok(Operation::HueRotate(whole(
+            "hueRotate",
+            "value",
+            op.value.ok_or_else(|| missing("hueRotate", "value"))?,
+            i32::MIN,
+            i32::MAX,
+        )?)),
         "convertColorSpace" => Ok(Operation::ConvertColourSpace {
             to: op.to.ok_or_else(|| missing("convertColorSpace", "to"))?,
             from: op.from,
@@ -327,8 +370,8 @@ fn operation_of(op: JsOperation) -> Result<Operation> {
             op.kernel
                 .ok_or_else(|| missing("filter3x3", "kernel"))?
                 .into_iter()
-                .map(|value| value as f32)
-                .collect(),
+                .map(|value| any_real("filter3x3", "kernel", value))
+                .collect::<Result<Vec<f32>>>()?,
         )),
         other => Err(Error::new(
             Status::InvalidArg,
@@ -764,5 +807,85 @@ mod tests {
             sharpen(5.0),
             Ok(Operation::Sharpen { threshold: 5, .. })
         ));
+    }
+
+    fn refused(result: Result<Operation>, what: &str) {
+        let error = result.expect_err(what);
+        assert!(
+            error.reason.starts_with("INVALID_OPERATION:"),
+            "{what}: {}",
+            error.reason
+        );
+    }
+
+    fn valued(kind: &str, value: f64) -> Result<Operation> {
+        operation_of(JsOperation {
+            value: Some(value),
+            ..operation(kind)
+        })
+    }
+
+    #[test]
+    fn brighten_and_hue_rotate_are_refused_rather_than_truncated_or_zeroed() {
+        // The range itself, -255..=255, is the engine's to refuse.
+        for value in [f64::NAN, f64::INFINITY, 2.9, 1e300] {
+            refused(valued("brighten", value), &format!("brighten {value}"));
+        }
+        for value in [f64::NAN, f64::NEG_INFINITY, 2.9, 1e300] {
+            refused(valued("hueRotate", value), &format!("hueRotate {value}"));
+        }
+        assert!(matches!(
+            valued("brighten", -255.0),
+            Ok(Operation::Brighten(-255))
+        ));
+        assert!(matches!(
+            valued("hueRotate", 400.0),
+            Ok(Operation::HueRotate(400))
+        ));
+    }
+
+    #[test]
+    fn every_real_field_is_refused_when_it_is_not_a_finite_f32() {
+        let opacity = |value: f64| {
+            operation_of(JsOperation {
+                image: Some(Buffer::from(vec![0u8])),
+                opacity: Some(value),
+                ..operation("composite")
+            })
+        };
+        for value in [f64::NAN, f64::INFINITY, -0.5, 1.5] {
+            refused(opacity(value), &format!("opacity {value}"));
+        }
+        assert!(opacity(0.5).is_ok());
+
+        let sigma = |kind: &str, value: f64| {
+            operation_of(JsOperation {
+                sigma: Some(value),
+                ..operation(kind)
+            })
+        };
+        for kind in ["blur", "fastBlur", "sharpen"] {
+            for value in [f64::NAN, f64::INFINITY, 1e300] {
+                refused(sigma(kind, value), &format!("{kind} sigma {value}"));
+            }
+        }
+
+        for value in [f64::NAN, 1e300] {
+            refused(valued("contrast", value), &format!("contrast {value}"));
+        }
+
+        let size = operation_of(JsOperation {
+            text: Some("x".into()),
+            font: Some(Buffer::from(vec![0u8])),
+            size: Some(1e300),
+            ..operation("watermarkText")
+        });
+        refused(size, "watermark size 1e300");
+
+        let kernel = operation_of(JsOperation {
+            kernel: Some(vec![0.0, 0.0, 0.0, 0.0, 1e300, 0.0, 0.0, 0.0, 0.0]),
+            ..operation("filter3x3")
+        });
+        refused(kernel, "kernel 1e300");
     }
 }

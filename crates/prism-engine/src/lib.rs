@@ -261,10 +261,13 @@ pub fn process(
                 y,
                 opacity,
             } => {
+                // Checked before the overlay is decoded: a NaN used to fade
+                // every alpha to zero, and the overlay silently vanished.
+                let opacity = ops::opacity(*opacity)?;
                 // The overlay is an upload too, in every case where the
                 // watermark is chosen per tenant. Same guards, same limits.
                 let overlay = decode(overlay_bytes, limits, true)?;
-                ops::composite(image, &fade(overlay, *opacity), *x, *y)
+                ops::composite(image, &fade(overlay, opacity), *x, *y)
             }
             Operation::WatermarkText {
                 text,
