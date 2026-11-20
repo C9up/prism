@@ -236,15 +236,7 @@ mod tests {
                 }
             }
         }
-        rxing::helpers::detect_in_luma(
-            pixels,
-            side as u32,
-            side as u32,
-            Some(rxing::BarcodeFormat::QR_CODE),
-        )
-        .expect("reads")
-        .getText()
-        .to_string()
+        crate::qr::read_back::read_luma(pixels, side as u32, side as u32)
     }
 
     #[test]

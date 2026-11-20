@@ -1132,15 +1132,7 @@ mod tests {
     fn read(bytes: &[u8]) -> String {
         let decoded = image::load_from_memory(bytes).expect("decodes").to_luma8();
         let (width, height) = decoded.dimensions();
-        rxing::helpers::detect_in_luma(
-            decoded.into_raw(),
-            width,
-            height,
-            Some(rxing::BarcodeFormat::QR_CODE),
-        )
-        .expect("reads")
-        .getText()
-        .to_string()
+        crate::qr::read_back::read_luma(decoded.into_raw(), width, height)
     }
 
     fn scaled(options: QrOptions) -> QrOptions {

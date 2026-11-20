@@ -22,6 +22,8 @@ use qrcode::{Color, EcLevel, QrCode, Version};
 use crate::encode::encode;
 use crate::error::EngineError;
 
+#[cfg(test)]
+mod read_back;
 mod style;
 pub mod swiss;
 
@@ -588,14 +590,8 @@ mod tests {
             let bytes = image(text, &defaults(), format, 100).expect("encodes");
             let decoded = image::load_from_memory(&bytes).expect("decodes").to_luma8();
             let (width, height) = decoded.dimensions();
-            let read = rxing::helpers::detect_in_luma(
-                decoded.into_raw(),
-                width,
-                height,
-                Some(rxing::BarcodeFormat::QR_CODE),
-            )
-            .expect("reads");
-            assert_eq!(read.getText(), text, "{format:?}");
+            let read = read_back::read_luma(decoded.into_raw(), width, height);
+            assert_eq!(read, text, "{format:?}");
         }
     }
 

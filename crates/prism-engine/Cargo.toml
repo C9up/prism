@@ -63,10 +63,11 @@ mp4parse = "0.17.0"
 dav1d = "0.11.1"
 
 [dev-dependencies]
-# Reading a generated QR code back: the proof that it scans. rxing is ZXing,
-# the decoder most phone scanners are built on; rqrr was tried first and
-# cannot find a round finder pattern that ZXing and phones read.
-rxing = { version = "0.9.3", default-features = false, features = ["qrcode", "decoders", "encoding_rs"] }
+# Reading a generated QR code back: the proof that it scans. zxing-cpp is the
+# maintained ZXing, the decoder family phone scanners are built on, and reads
+# round finder patterns (rqrr and quircs do not). `bundled` builds it from the
+# crate's sources with cmake: a test-only build, nothing of it ships.
+zxing-cpp = { version = "0.5.3", default-features = false, features = ["bundled"] }
 # Proving the output carries no EXIF block: the test reads with the same
 # library the engine uses, so a change in either is caught by the other.
 # Lossy WebP. `image`'s own encoder is lossless-only, and lossless WebP is
