@@ -107,7 +107,7 @@ export interface ThumbnailOptions {
 }
 
 export interface SharpenOptions {
-	/** Radius. 0-100. */
+	/** Radius, above 0, up to 100. */
 	sigma: number;
 	/**
 	 * Contrast step below which nothing is sharpened, a whole number from 0

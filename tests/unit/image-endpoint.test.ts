@@ -837,6 +837,120 @@ describe("what producing a variant costs", () => {
 	});
 });
 
+/**
+ * Every `Buffer.alloc` made while `run` is pending, by size. Reading a source
+ * allocates its buffer this way, so this is what reading files costs.
+ */
+async function allocations(run: () => Promise<unknown>): Promise<number[]> {
+	const spy = vi.spyOn(Buffer, "alloc");
+	try {
+		await run();
+		return spy.mock.calls.map(([size]) => size);
+	} finally {
+		spy.mockRestore();
+	}
+}
+
+const sum = (sizes: readonly number[]): number =>
+	sizes.reduce((total, size) => total + size, 0);
+
+describe("what identifying a source costs", () => {
+	it("reads a small head of a large non-image, once, however many ask at once", async () => {
+		// A video in `public/` is the realistic case: every request for it used
+		// to read the whole file before the render gate, N at a time.
+		const size = 4 * 1024 * 1024;
+		const { dir } = await root({ "clip.mp4": Buffer.alloc(size) });
+		const request = mount({ roots: [dir], widths: [640] });
+		let answers: Answer[] = [];
+		const sizes = await allocations(async () => {
+			answers = await Promise.all(
+				Array.from({ length: 50 }, () =>
+					request({ src: "clip.mp4", w: "640" }),
+				),
+			);
+		});
+		expect(new Set(answers.map((answer) => answer.status))).toEqual(
+			new Set([404]),
+		);
+		expect(Math.max(0, ...sizes)).toBeLessThan(size);
+		expect(sum(sizes)).toBeLessThanOrEqual(50 * 64 * 1024);
+	});
+
+	it("remembers a non-image, so asking again reads nothing", async () => {
+		const { dir } = await root({ "clip.mp4": Buffer.alloc(1024 * 1024) });
+		const request = mount({ roots: [dir], widths: [640] });
+		expect((await request({ src: "clip.mp4", w: "640" })).status).toBe(404);
+		const spy = vi.spyOn(images, "inspect");
+		const sizes = await allocations(() =>
+			request({ src: "clip.mp4", w: "640" }),
+		);
+		expect(spy).not.toHaveBeenCalled();
+		expect(sum(sizes)).toBeLessThan(1024);
+	});
+
+	it("remembers an image the application does not allow", async () => {
+		const { dir, source } = await root();
+		const pngless = new Prism({ limits: { allowedFormats: ["jpeg"] } });
+		const request = mount({ roots: [dir], widths: [400] }, pngless);
+		expect((await request({ src: "photo.png", w: "400" })).status).toBe(422);
+		const sizes = await allocations(() =>
+			request({ src: "photo.png", w: "400" }),
+		);
+		expect(Math.max(0, ...sizes)).toBeLessThan(source.length);
+	});
+
+	it("identifies a large image once when many ask at once, then renders it once", async () => {
+		const { dir, source } = await root();
+		// Larger than the head: identified from the whole file, in the gate.
+		expect(source.length).toBeGreaterThan(64 * 1024);
+		const request = mount({ roots: [dir], widths: [400] });
+		let answers: Answer[] = [];
+		const sizes = await allocations(async () => {
+			answers = await Promise.all(
+				Array.from({ length: 20 }, () =>
+					request({ src: "photo.png", w: "400", f: "webp" }),
+				),
+			);
+		});
+		expect(new Set(answers.map((answer) => answer.status))).toEqual(
+			new Set([200]),
+		);
+		// One whole read to identify it, one to render it.
+		expect(sizes.filter((size) => size === source.length)).toHaveLength(2);
+	});
+
+	it("reads a large source whole only inside the render gate", async () => {
+		const { dir, source } = await root();
+		await writeFile(join(dir, "other.png"), source);
+		const engine = new HeldPrism();
+		const request = mount(
+			{ roots: [dir], widths: [400], concurrency: 1, queueLimit: 0 },
+			engine,
+		);
+		const first = request({ src: "photo.png", w: "400", f: "webp" });
+		await engine.parked(1);
+		// The only slot is rendering: identifying another large source would
+		// mean a whole read outside the bound, so it is turned away instead.
+		let second: Answer | undefined;
+		const sizes = await allocations(async () => {
+			second = await request({ src: "other.png", w: "400", f: "webp" });
+		});
+		expect(second?.status).toBe(503);
+		expect(Math.max(0, ...sizes)).toBeLessThan(source.length);
+		engine.releaseAll();
+		expect((await first).status).toBe(200);
+	});
+
+	it("does not let one route's refusal answer for another route's engine", async () => {
+		const { dir } = await root();
+		const pngless = new Prism({ limits: { allowedFormats: ["jpeg"] } });
+		const refusing = mount({ roots: [dir], widths: [400] }, pngless);
+		const serving = mount({ roots: [dir], widths: [400] });
+		expect((await refusing({ src: "photo.png", w: "400" })).status).toBe(422);
+		expect((await serving({ src: "photo.png", w: "400" })).status).toBe(200);
+	});
+});
+
 describe("caching", () => {
 	it("tags a variant and answers a revalidation without reading it", async () => {
 		const { dir } = await root();

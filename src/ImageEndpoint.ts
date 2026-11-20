@@ -413,12 +413,17 @@ async function procfsPath(handle: FileHandle): Promise<string | undefined> {
 	}
 }
 
+/** The whole of an open source. Only ever called inside the render gate. */
+function readSource(source: OpenedSource): Promise<Buffer> {
+	return readHead(source, source.info.size);
+}
+
 /**
- * The first `size` bytes of an open source, read by position so every read of
- * the same handle starts at its beginning.
+ * The first `limit` bytes of an open source (fewer when it is shorter), read
+ * by position so every read of the same handle starts at its beginning.
  */
-async function readSource(source: OpenedSource): Promise<Buffer> {
-	const size = source.info.size;
+async function readHead(source: OpenedSource, limit: number): Promise<Buffer> {
+	const size = Math.min(source.info.size, limit);
 	const buffer = Buffer.alloc(size);
 	let filled = 0;
 	while (filled < size) {
@@ -491,33 +496,142 @@ function variantKey(input: {
 }
 
 /**
- * What each source version is, so a source is read and identified once per
- * version rather than once per request. Bounded: one entry per file version,
- * the oldest dropped first.
+ * How much of a source is read, outside the render gate, to identify it.
+ *
+ * A source no larger than this is identified from all of it. A larger one is
+ * identified from all of it too, but inside the gate: a header alone does not
+ * reliably carry the answer — a JPEG's EXIF orientation and frame header can
+ * sit behind large APP segments, a TIFF's first directory anywhere in the
+ * file — and a wrong orientation would render the wrong width. What the head
+ * of a larger source does settle on its own is the signature: "not an image"
+ * and "a format this application refuses" are read from the first bytes.
  */
-const described = new Map<string, SourceInfo>();
-const DESCRIBED_ENTRIES = 1024;
+const HEAD_BYTES = 64 * 1024;
 
-async function describe(
-	images: Prism,
-	file: OpenedSource,
-): Promise<SourceInfo> {
-	const id = [file.path, file.info.size, file.info.mtimeMs].join("\u0000");
-	const known = described.get(id);
-	if (known !== undefined) return known;
-	// Header only: `inspect` never decodes pixels, AVIF included.
-	const meta = images.inspect(await readSource(file));
-	const source: SourceInfo = {
-		format: meta.format,
-		width: meta.width,
-		orientedWidth: meta.orientedWidth,
-	};
-	if (described.size >= DESCRIBED_ENTRIES) {
-		const oldest = described.keys().next();
-		if (oldest.done !== true) described.delete(oldest.value);
+/** What a source version turned out to be. */
+type Description =
+	| { kind: "image"; source: SourceInfo }
+	| { kind: "refused"; notAnImage: boolean };
+
+/**
+ * Engine refusals that depend only on the bytes of a source version, and so
+ * are remembered like a success. Anything else — a panic, a missing engine —
+ * says nothing about the file and is answered without being kept.
+ */
+const SETTLED_REFUSALS = new Set([
+	"E_PRISM_EMPTY_INPUT",
+	"E_PRISM_UNKNOWN_FORMAT",
+	"E_PRISM_UNSUPPORTED_FORMAT",
+	"E_PRISM_FORMAT_NOT_ALLOWED",
+	"E_PRISM_INPUT_TOO_LARGE",
+	"E_PRISM_TOO_MANY_PIXELS",
+	"E_PRISM_ZERO_DIMENSION",
+	"E_PRISM_UNREADABLE",
+	"E_PRISM_DECODE_FAILED",
+]);
+
+/** Refusals a source's first bytes are enough to settle. */
+const SIGNATURE_REFUSALS = new Set([
+	"E_PRISM_EMPTY_INPUT",
+	"E_PRISM_UNKNOWN_FORMAT",
+	"E_PRISM_FORMAT_NOT_ALLOWED",
+]);
+
+/** The engine's answer about `bytes`, as something the catalogue can keep. */
+function identify(images: Prism, bytes: Buffer): Description {
+	try {
+		const meta = images.inspect(bytes);
+		return {
+			kind: "image",
+			source: {
+				format: meta.format,
+				width: meta.width,
+				orientedWidth: meta.orientedWidth,
+			},
+		};
+	} catch (error) {
+		if (error instanceof PrismError && SETTLED_REFUSALS.has(error.code)) {
+			return { kind: "refused", notAnImage: isNotAnImage(error) };
+		}
+		throw error;
 	}
-	described.set(id, source);
-	return source;
+}
+
+/**
+ * What each source version is, so a source is read and identified once per
+ * version rather than once per request — a refusal included, or a video in a
+ * root would be read again by every request naming it.
+ *
+ * One per mounted route: what a route refuses depends on its engine's
+ * configuration, and another route's engine may accept it.
+ */
+class SourceCatalogue {
+	/** Bounded: one entry per file version, the oldest dropped first. */
+	static readonly ENTRIES = 1024;
+
+	readonly #images: Prism;
+	readonly #gate: RenderGate;
+	readonly #entries = new Map<string, Description>();
+	/** Identifications in flight, so N requests at once read the source once. */
+	readonly #pending = new Map<string, Promise<Description | undefined>>();
+
+	constructor(images: Prism, gate: RenderGate) {
+		this.#images = images;
+		this.#gate = gate;
+	}
+
+	/**
+	 * What `file` is, or `undefined` when identifying it needs the gate and
+	 * the gate's queue is full.
+	 */
+	async describe(file: OpenedSource): Promise<Description | undefined> {
+		const id = [file.path, file.info.size, file.info.mtimeMs].join("\u0000");
+		const known = this.#entries.get(id);
+		if (known !== undefined) return known;
+		let pending = this.#pending.get(id);
+		if (pending === undefined) {
+			pending = this.#identify(file).then((description) => {
+				if (description !== undefined) this.#remember(id, description);
+				return description;
+			});
+			const settled = pending.finally(() => this.#pending.delete(id));
+			// Every waiter handles the rejection itself; this copy only clears
+			// the slot.
+			settled.catch(() => undefined);
+			this.#pending.set(id, pending);
+		}
+		return pending;
+	}
+
+	async #identify(file: OpenedSource): Promise<Description | undefined> {
+		const head = await readHead(file, HEAD_BYTES);
+		if (head.length >= file.info.size) return identify(this.#images, head);
+		try {
+			this.#images.inspect(head);
+		} catch (error) {
+			if (error instanceof PrismError && SIGNATURE_REFUSALS.has(error.code)) {
+				return { kind: "refused", notAnImage: isNotAnImage(error) };
+			}
+		}
+		// An image, or something the head cannot settle: the whole file, read
+		// where `concurrency` x `maxBytes` bounds what reads hold at once.
+		const slot = this.#gate.acquire();
+		if (slot === undefined) return undefined;
+		const release = await slot;
+		try {
+			return identify(this.#images, await readSource(file));
+		} finally {
+			release();
+		}
+	}
+
+	#remember(id: string, description: Description): void {
+		if (this.#entries.size >= SourceCatalogue.ENTRIES) {
+			const oldest = this.#entries.keys().next();
+			if (oldest.done !== true) this.#entries.delete(oldest.value);
+		}
+		this.#entries.set(id, description);
+	}
 }
 
 /**
@@ -681,6 +795,7 @@ export function registerImageRoute(
 ): unknown {
 	const settings = resolveConfig(config, images);
 	const gate = new RenderGate(settings.concurrency, settings.queueLimit);
+	const catalogue = new SourceCatalogue(images, gate);
 	const memory =
 		settings.cacheDir === undefined && settings.memoryCacheBytes > 0
 			? new MemoryCache(settings.memoryCacheBytes)
@@ -704,6 +819,14 @@ export function registerImageRoute(
 				"E_PRISM_IMAGE_UNPROCESSABLE",
 				"the source is not an image this endpoint can serve",
 			);
+		const busy = (): void => {
+			ctx.response.header("retry-after", "2");
+			fail(
+				503,
+				"E_PRISM_IMAGE_BUSY",
+				"too many images are being rendered; retry shortly",
+			);
+		};
 
 		const src = queryParam(ctx.request, "src");
 		if (src === undefined) {
@@ -775,14 +898,23 @@ export function registerImageRoute(
 				return;
 			}
 
-			let source: SourceInfo;
+			let description: Description | undefined;
 			try {
-				source = await describe(images, file);
-			} catch (error) {
-				if (isNotAnImage(error)) notFound();
+				description = await catalogue.describe(file);
+			} catch {
+				unprocessable();
+				return;
+			}
+			if (description === undefined) {
+				busy();
+				return;
+			}
+			if (description.kind === "refused") {
+				if (description.notAnImage) notFound();
 				else unprocessable();
 				return;
 			}
+			const source = description.source;
 			// No format asked for: re-encode into whatever the source IS — read
 			// from its content, never from its name.
 			let output = format;
@@ -834,12 +966,7 @@ export function registerImageRoute(
 				if (work === undefined) {
 					const slot = gate.acquire();
 					if (slot === undefined) {
-						ctx.response.header("retry-after", "2");
-						fail(
-							503,
-							"E_PRISM_IMAGE_BUSY",
-							"too many images are being rendered; retry shortly",
-						);
+						busy();
 						return;
 					}
 					work = (async (): Promise<Buffer> => {
