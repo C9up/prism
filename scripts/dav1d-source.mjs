@@ -20,9 +20,20 @@
  *     left under <target-dir> is at the commit below: the proof that the
  *     redirect took effect, whatever git the runner has.
  *
- * Moving dav1d is a deliberate edit of the tag AND the commit, checked
+ * The mirror serves a newer dav1d than the build script asks for: its `1.5.0`
+ * tag holds upstream's 1.5.5. MSVC 19.52 (windows-2025-vs2026 since
+ * 2026-11-16) cannot compile 1.5.0's compat stdatomic.h (C7780,
+ * `__has_include_next`), and dav1d-sys's build script ignores meson's exit
+ * code, so the failure only surfaced at link time as a missing dav1d.lib.
+ * 1.5.5 carries that fix ("Fix building with newer versions of MSVC") with
+ * out-of-bounds-read fixes, and keeps API 7.0.0: its public headers differ
+ * from 1.5.0's in comments only, so dav1d-sys 0.8.3's bindings still match.
+ * dav1d-sys 0.9.0 cannot be used instead: `image` 0.25 requires dav1d 0.11
+ * (dav1d-sys 0.8), and 0.9.0 builds 1.5.4, which has the same MSVC failure.
+ *
+ * Moving dav1d is a deliberate edit of RELEASE AND the commit, checked
  * against the tag on code.videolan.org and its GitHub mirror, and of the
- * dav1d-sys version whose build script clones it.
+ * dav1d-sys version whose build script clones TAG.
  */
 
 import { execFileSync } from "node:child_process";
@@ -33,8 +44,10 @@ import { pathToFileURL } from "node:url";
 /** What dav1d-sys 0.8.3's build.rs clones (its REPO and TAG). */
 const REPOSITORY = "https://code.videolan.org/videolan/dav1d.git";
 const TAG = "1.5.0";
-/** `refs/tags/1.5.0^{}` on code.videolan.org and github.com/videolan/dav1d. */
-const COMMIT = "32cf02af50f32af108a3b281c452788dccdac648";
+/** The upstream release served under TAG. */
+const RELEASE = "1.5.5";
+/** `refs/tags/1.5.5^{}` on code.videolan.org and github.com/videolan/dav1d. */
+const COMMIT = "6c7bee685677fd997a431302be4fea8ea4017606";
 
 function git(args, cwd) {
 	return execFileSync("git", args, {
@@ -62,17 +75,17 @@ function fetch(directory) {
 			"--depth",
 			"1",
 			REPOSITORY,
-			`+refs/tags/${TAG}:refs/tags/${TAG}`,
+			`+refs/tags/${RELEASE}:refs/tags/${TAG}`,
 		],
 		mirror,
 	);
 	const fetched = git(["rev-parse", `refs/tags/${TAG}^{commit}`], mirror);
 	if (fetched !== COMMIT) {
 		fail(
-			`dav1d tag ${TAG} is commit ${fetched}, not the pinned ${COMMIT}: refusing to build it`,
+			`dav1d tag ${RELEASE} is commit ${fetched}, not the pinned ${COMMIT}: refusing to build it`,
 		);
 	}
-	console.log(`dav1d ${TAG} is ${COMMIT}, as pinned`);
+	console.log(`dav1d ${RELEASE} is ${COMMIT}, as pinned, served as ${TAG}`);
 
 	// Appended to whatever git configuration the environment already passes.
 	const index = Number(process.env.GIT_CONFIG_COUNT ?? "0");

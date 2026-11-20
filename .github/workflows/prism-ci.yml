@@ -48,7 +48,8 @@ concurrency:
 #   still install the package.
 #
 #   `dav1d-sys` has a second path: `SYSTEM_DEPS_DAV1D_BUILD_INTERNAL` makes it
-#   clone dav1d 1.5.0 and build it with meson as a STATIC library. Measured,
+#   clone dav1d's 1.5.0 tag (which our mirror serves as upstream 1.5.5,
+#   see scripts/dav1d-source.mjs) and build it with meson as a STATIC library. Measured,
 #   both ways, on linux-x64:
 #
 #       system lib   → ldd lists libdav1d.so.7
