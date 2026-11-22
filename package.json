@@ -72,11 +72,11 @@
     "@c9up/ream": "^0.2.25",
     "@types/node": "^22.20.1",
     "@types/pdfkit": "^0.17.6",
-    "@vitest/coverage-v8": "4.1.11",
+    "@vitest/coverage-v8": "4.1.12",
     "pdfkit": "^0.19.1",
     "swissqrbill": "4.4.2",
     "typescript": "^6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   },
   "peerDependencies": {
     "@c9up/ream": "^0.2.26"
