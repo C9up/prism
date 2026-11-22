@@ -53,7 +53,7 @@ qrcode = { version = "0.14.1", default-features = false }
 # PNG and the SVG cannot drift apart. No text, fonts or embedded raster
 # images — the SVG has none, and the logo is decoded by Prism's own guarded
 # path and composited after.
-resvg = { version = "0.48.1", default-features = false }
+resvg = { version = "0.50", default-features = false }
 
 # Bounding an AVIF without `image`, whose AVIF decoder decodes the whole
 # frame in its constructor and gives `dav1d` no frame-size limit (see
