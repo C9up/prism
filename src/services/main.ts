@@ -6,6 +6,7 @@
  *   const thumb = await images.edit(upload).resize({ width: 300 }).toFormat("webp")
  */
 
+import { E_PRISM_NOT_BOOTED } from "../errors.js";
 import type { Prism } from "../Prism.js";
 
 let instance: Prism | undefined;
@@ -36,10 +37,7 @@ const images: Prism = new Proxy(target, {
 		// import into a crash far from any real use.
 		if (typeof prop === "symbol" || prop === "then") return undefined;
 		if (!instance) {
-			throw new Error(
-				"[prism] Prism singleton accessed before PrismProvider.boot() ran " +
-					"or `setPrism(myPrism)` was called. Wire one of them first.",
-			);
+			throw new E_PRISM_NOT_BOOTED();
 		}
 		const value = Reflect.get(instance, prop, instance);
 		return typeof value === "function" ? value.bind(instance) : value;

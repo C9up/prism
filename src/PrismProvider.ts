@@ -10,6 +10,11 @@
  */
 
 import "./augmentations.js";
+import {
+	E_PRISM_INVALID_BINDING,
+	E_PRISM_INVALID_CONFIG,
+	E_PRISM_INVALID_SERVE_CONFIG,
+} from "./errors.js";
 import { type ImageRouter, registerImageRoute } from "./ImageEndpoint.js";
 import { Prism } from "./Prism.js";
 import { clearPrism, getPrism, setPrism } from "./services/main.js";
@@ -57,9 +62,7 @@ export default class PrismProvider {
 	async #resolvePrism(): Promise<Prism> {
 		const resolved = await this.app.container.resolve(Prism);
 		if (!(resolved instanceof Prism)) {
-			throw new Error(
-				"[prism] the container returned something that is not a Prism for the Prism token.",
-			);
+			throw new E_PRISM_INVALID_BINDING(["Prism", "Prism"]);
 		}
 		return resolved;
 	}
@@ -72,9 +75,7 @@ export default class PrismProvider {
 			// prism config is a typo in a file the author believed was read.
 			if (raw === undefined) return new Prism();
 			if (!isPrismConfig(raw)) {
-				throw new Error(
-					"[prism] config/images.ts must export defineConfig({ ... }).",
-				);
+				throw new E_PRISM_INVALID_CONFIG();
 			}
 			return new Prism(raw);
 		});
@@ -113,16 +114,14 @@ export default class PrismProvider {
 		const serve = images.config().serve;
 		if (serve === undefined) return;
 		if (serve.roots.length === 0) {
-			throw new Error(
-				"[prism] images.serve declares no roots, so the endpoint would serve nothing. Name the directories images may be read from.",
-			);
+			throw new E_PRISM_INVALID_SERVE_CONFIG([
+				"images.serve declares no roots, so the endpoint would serve nothing. Name the directories images may be read from.",
+			]);
 		}
 		if (!this.app.container.has("router")) return;
 		const router = await this.app.container.resolve("router");
 		if (!isRouter(router)) {
-			throw new Error(
-				"[prism] the container returned something that is not a router for the router token.",
-			);
+			throw new E_PRISM_INVALID_BINDING(["router", "router"]);
 		}
 		registerImageRoute(router, images, serve);
 	}

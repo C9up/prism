@@ -7,6 +7,7 @@
  * engine (crates/prism-engine/src/qr/swiss.rs, decoded by rxing).
  */
 
+import { Exception } from "@c9up/flare";
 import PDFDocument from "pdfkit";
 import { ValidationError as UpstreamValidationError } from "swissqrbill/errors";
 import {
@@ -19,7 +20,7 @@ import {
 } from "swissqrbill/svg";
 import * as upstreamUtils from "swissqrbill/utils";
 import { describe, expect, it } from "vitest";
-import { PrismError } from "../../src/errors.js";
+import { errors } from "../../src/index.js";
 import { ValidationError } from "../../src/swissqrbill/errors.js";
 import {
 	SwissQRBill as PDFBill,
@@ -523,7 +524,7 @@ describe("prism > swissqrbill validation", () => {
 		const ours = thrown(() => new PDFBill(data));
 		expect(theirs).toBeInstanceOf(UpstreamValidationError);
 		expect(ours).toBeInstanceOf(ValidationError);
-		expect(ours).toBeInstanceOf(PrismError);
+		expect(ours).toBeInstanceOf(Exception);
 		expect(ours.message).toBe(theirs.message);
 		expect(ours.name).toBe(theirs.name);
 		expect(Reflect.get(ours, "code")).toBe(Reflect.get(theirs, "code"));
@@ -816,7 +817,7 @@ describe("prism > swissqrbill validation", () => {
 					reference: "210000000003139471430009017",
 				}),
 		);
-		expect(error).toBeInstanceOf(PrismError);
+		expect(error).toBeInstanceOf(errors.E_PRISM_QR_TOO_LONG);
 		expect(Reflect.get(error, "code")).toBe("E_PRISM_QR_TOO_LONG");
 	});
 });

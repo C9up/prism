@@ -1,79 +1,157 @@
 /**
- * Prism errors.
+ * Prism errors, one class per code. An application branches on
+ * `error.code` or on `error instanceof errors.E_…`; every one is a flare
+ * `Exception`, with the HTTP status an exception handler answers with.
  *
- * The engine reports a stable code with every failure; this is where it
- * becomes something a controller can branch on. A caller rejecting an upload
- * needs to tell "that is not an image" from "the engine is not installed",
- * and a message is not a contract.
+ * The engine refusals that mean "this input is not an image prism will take"
+ * answer 422, as the image endpoint does for them: the request was readable,
+ * the upload was not. The rest are faults of the application or the host.
  */
 
-export class PrismError extends Error {
-	readonly code: string;
+import { createError } from "@c9up/flare";
 
-	constructor(code: string, message: string, options?: ErrorOptions) {
-		super(message, options);
-		this.name = new.target.name;
-		this.code = code;
-	}
-}
+/** The input is empty. */
+export const E_PRISM_EMPTY_INPUT = createError<[string]>(
+	"%s",
+	"E_PRISM_EMPTY_INPUT",
+	422,
+);
 
-/** Every code the engine can report. */
-export const PRISM_CODES = [
-	"EMPTY_INPUT",
-	"INPUT_TOO_LARGE",
-	"TOO_MANY_PIXELS",
-	"ZERO_DIMENSION",
-	"UNKNOWN_FORMAT",
-	"UNSUPPORTED_FORMAT",
-	"FORMAT_NOT_ALLOWED",
-	"UNREADABLE",
-	"DECODE_FAILED",
-	"ENCODE_FAILED",
-	"INVALID_GEOMETRY",
-	"INVALID_FONT",
-	"COLOUR_SPACE",
-	"INVALID_OPERATION",
-	"QR_TOO_LONG",
-	"INVALID_QR_OPTION",
-	"INTERNAL_PANIC",
-] as const;
+/** The input is over `maxBytes`. */
+export const E_PRISM_INPUT_TOO_LARGE = createError<[string]>(
+	"%s",
+	"E_PRISM_INPUT_TOO_LARGE",
+	422,
+);
 
-export type PrismCode = (typeof PRISM_CODES)[number];
+/** The image, or one an operation would build, is over `maxPixels`. */
+export const E_PRISM_TOO_MANY_PIXELS = createError<[string]>(
+	"%s",
+	"E_PRISM_TOO_MANY_PIXELS",
+	422,
+);
 
-function isKnownCode(value: string): value is PrismCode {
-	return (PRISM_CODES as readonly string[]).includes(value);
-}
+/** The image has a zero width or height. */
+export const E_PRISM_ZERO_DIMENSION = createError<[string]>(
+	"%s",
+	"E_PRISM_ZERO_DIMENSION",
+	422,
+);
 
-/**
- * Split the engine's `CODE: message` into a coded error.
- *
- * The engine cannot throw a JavaScript class across the NAPI boundary, so it
- * prefixes the code onto the message and this puts it back. A message that
- * does not carry a known code is passed through under `E_PRISM_ENGINE` rather
- * than guessed at — inventing a code would be worse than admitting there
- * isn't one.
- */
-export function fromEngine(error: unknown): PrismError {
-	const message = error instanceof Error ? error.message : String(error);
-	const separator = message.indexOf(": ");
-	if (separator > 0) {
-		const code = message.slice(0, separator);
-		if (isKnownCode(code)) {
-			return new PrismError(`E_PRISM_${code}`, message.slice(separator + 2), {
-				cause: error,
-			});
-		}
-	}
-	return new PrismError("E_PRISM_ENGINE", message, { cause: error });
-}
+/** The bytes are not an image format prism recognises. */
+export const E_PRISM_UNKNOWN_FORMAT = createError<[string]>(
+	"%s",
+	"E_PRISM_UNKNOWN_FORMAT",
+	422,
+);
 
-/** Raised when an operation needs the Rust engine and it is not there. */
-export class PrismNativeRequiredError extends PrismError {
-	constructor(reason: string) {
-		super(
-			"E_PRISM_NATIVE_REQUIRED",
-			`The Rust image engine is required but not loaded — ${reason}.\n` +
-				"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
-		);
-	}
-}
+/** The format is recognised but not supported. */
+export const E_PRISM_UNSUPPORTED_FORMAT = createError<[string]>(
+	"%s",
+	"E_PRISM_UNSUPPORTED_FORMAT",
+	422,
+);
+
+/** The format is not in `allowedFormats`. */
+export const E_PRISM_FORMAT_NOT_ALLOWED = createError<[string]>(
+	"%s",
+	"E_PRISM_FORMAT_NOT_ALLOWED",
+	422,
+);
+
+/** The image cannot be read. */
+export const E_PRISM_UNREADABLE = createError<[string]>(
+	"%s",
+	"E_PRISM_UNREADABLE",
+	422,
+);
+
+/** Decoding failed. */
+export const E_PRISM_DECODE_FAILED = createError<[string]>(
+	"%s",
+	"E_PRISM_DECODE_FAILED",
+	422,
+);
+
+/** Encoding the output failed. */
+export const E_PRISM_ENCODE_FAILED = createError<[string]>(
+	"%s",
+	"E_PRISM_ENCODE_FAILED",
+);
+
+/** A crop outside the image, a target size of zero. */
+export const E_PRISM_INVALID_GEOMETRY = createError<[string]>(
+	"%s",
+	"E_PRISM_INVALID_GEOMETRY",
+);
+
+/** A font cannot be used. */
+export const E_PRISM_INVALID_FONT = createError<[string]>(
+	"%s",
+	"E_PRISM_INVALID_FONT",
+);
+
+/** A colour space cannot be named, or a conversion is refused. */
+export const E_PRISM_COLOUR_SPACE = createError<[string]>(
+	"%s",
+	"E_PRISM_COLOUR_SPACE",
+);
+
+/** An operation lacks a field or has one out of range. */
+export const E_PRISM_INVALID_OPERATION = createError<[string]>(
+	"%s",
+	"E_PRISM_INVALID_OPERATION",
+);
+
+/** More text than a QR code can hold at the chosen level and version. */
+export const E_PRISM_QR_TOO_LONG = createError<[string]>(
+	"%s",
+	"E_PRISM_QR_TOO_LONG",
+);
+
+/** A QR code option is out of range, or a colour is not strict hex. */
+export const E_PRISM_INVALID_QR_OPTION = createError<[string]>(
+	"%s",
+	"E_PRISM_INVALID_QR_OPTION",
+);
+
+/** The engine panicked. */
+export const E_PRISM_INTERNAL_PANIC = createError<[string]>(
+	"%s",
+	"E_PRISM_INTERNAL_PANIC",
+);
+
+/** The engine failed without a code prism knows. */
+export const E_PRISM_ENGINE = createError<[string]>("%s", "E_PRISM_ENGINE");
+
+/** An operation needs the Rust engine and it is not loaded. */
+export const E_PRISM_NATIVE_REQUIRED = createError<[string]>(
+	"The Rust image engine is required but not loaded — %s.\n" +
+		"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
+	"E_PRISM_NATIVE_REQUIRED",
+);
+
+/** The `services/main` engine was used before it was set. */
+export const E_PRISM_NOT_BOOTED = createError(
+	"[prism] Prism singleton accessed before PrismProvider.boot() ran " +
+		"or `setPrism(myPrism)` was called. Wire one of them first.",
+	"E_PRISM_NOT_BOOTED",
+);
+
+/** `config/images.ts` does not export a `defineConfig({ ... })` config. */
+export const E_PRISM_INVALID_CONFIG = createError(
+	"[prism] config/images.ts must export defineConfig({ ... }).",
+	"E_PRISM_INVALID_CONFIG",
+);
+
+/** `images.serve` declares no roots, or one of its counts is out of range. */
+export const E_PRISM_INVALID_SERVE_CONFIG = createError<[string]>(
+	"[prism] %s",
+	"E_PRISM_INVALID_SERVE_CONFIG",
+);
+
+/** The container resolved something of the wrong kind for a token. */
+export const E_PRISM_INVALID_BINDING = createError<[string, string]>(
+	"[prism] the container returned something that is not a %s for the %s token.",
+	"E_PRISM_INVALID_BINDING",
+);

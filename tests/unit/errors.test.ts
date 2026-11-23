@@ -1,10 +1,26 @@
+import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
-import {
-	fromEngine,
-	PRISM_CODES,
-	PrismError,
-	PrismNativeRequiredError,
-} from "../../src/errors.js";
+import { fromEngine } from "../../src/engineErrors.js";
+import { errors, PRISM_CODES } from "../../src/index.js";
+
+describe("prism > errors", () => {
+	it("the entry exports every error as one `errors` namespace", () => {
+		const error = new errors.E_PRISM_INVALID_BINDING(["Prism", "Prism"]);
+		expect(error).toBeInstanceOf(Exception);
+		expect(error).toBeInstanceOf(errors.E_PRISM_INVALID_BINDING);
+		expect(error.code).toBe("E_PRISM_INVALID_BINDING");
+		expect(error.status).toBe(500);
+		expect(error.message).toBe(
+			"[prism] the container returned something that is not a Prism for the Prism token.",
+		);
+	});
+
+	it("an upload the engine refuses answers 422", () => {
+		const error = new errors.E_PRISM_UNKNOWN_FORMAT(["not an image"]);
+		expect(error).toBeInstanceOf(Exception);
+		expect(error.status).toBe(422);
+	});
+});
 
 describe("fromEngine", () => {
 	it("lifts the engine's code prefix into a code a caller can branch on", () => {
@@ -14,7 +30,7 @@ describe("fromEngine", () => {
 		const error = fromEngine(
 			new Error("TOO_MANY_PIXELS: the image declares 9e9"),
 		);
-		expect(error).toBeInstanceOf(PrismError);
+		expect(error).toBeInstanceOf(errors.E_PRISM_TOO_MANY_PIXELS);
 		expect(error.code).toBe("E_PRISM_TOO_MANY_PIXELS");
 		expect(error.message).toBe("the image declares 9e9");
 	});
@@ -52,10 +68,12 @@ describe("fromEngine", () => {
 	});
 });
 
-describe("PrismNativeRequiredError", () => {
+describe("E_PRISM_NATIVE_REQUIRED", () => {
 	it("says why it is missing and how to get it", () => {
 		// A missing binary is the one failure where the message IS the fix.
-		const error = new PrismNativeRequiredError("no binary for linux-riscv64");
+		const error = new errors.E_PRISM_NATIVE_REQUIRED([
+			"no binary for linux-riscv64",
+		]);
 		expect(error.code).toBe("E_PRISM_NATIVE_REQUIRED");
 		expect(error.message).toContain("no binary for linux-riscv64");
 		expect(error.message).toContain("pnpm build:napi");

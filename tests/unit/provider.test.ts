@@ -76,6 +76,9 @@ describe("PrismProvider", () => {
 		const provider = new PrismProvider(app({ images: { limits: "lots" } }));
 		provider.register();
 		await expect(provider.boot()).rejects.toThrow(/defineConfig/);
+		await expect(provider.boot()).rejects.toMatchObject({
+			code: "E_PRISM_INVALID_CONFIG",
+		});
 	});
 
 	it("passes the configured limits through to the engine", async () => {
@@ -102,6 +105,9 @@ describe("PrismProvider", () => {
 		provider.register();
 		host.bindings.set(Prism, () => ({ notAPrism: true }));
 		await expect(provider.boot()).rejects.toThrow(/not a Prism/);
+		await expect(provider.boot()).rejects.toMatchObject({
+			code: "E_PRISM_INVALID_BINDING",
+		});
 	});
 
 	it("clears the singleton on shutdown, but only while it is still ours", async () => {
@@ -131,6 +137,9 @@ describe("services/main", () => {
 		clearPrism();
 		expect(() => images.inspect(Buffer.alloc(0))).toThrow(
 			/before PrismProvider.boot/,
+		);
+		expect(() => images.inspect(Buffer.alloc(0))).toThrow(
+			expect.objectContaining({ code: "E_PRISM_NOT_BOOTED" }),
 		);
 	});
 
@@ -239,6 +248,23 @@ describe("PrismProvider and the image endpoint", () => {
 		const provider = new PrismProvider(host);
 		provider.register();
 		await expect(provider.boot()).rejects.toThrow(/no roots/);
+		await expect(provider.boot()).rejects.toMatchObject({
+			code: "E_PRISM_INVALID_SERVE_CONFIG",
+		});
+	});
+
+	it("refuses a container that bound the router token to something else", async () => {
+		clearPrism();
+		const host = app({
+			images: defineConfig({ serve: { roots: ["/srv/public"] } }),
+		});
+		host.bindings.set("router", () => ({ notARouter: true }));
+		const provider = new PrismProvider(host);
+		provider.register();
+		await expect(provider.boot()).rejects.toMatchObject({
+			code: "E_PRISM_INVALID_BINDING",
+		});
+		clearPrism();
 	});
 
 	it("leaves the endpoint unmounted outside Ream", async () => {

@@ -59,7 +59,8 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
-import { PrismError } from "./errors.js";
+import { Exception } from "@c9up/flare";
+import { E_PRISM_INVALID_SERVE_CONFIG } from "./errors.js";
 import { openedPathNative } from "./native.js";
 import type { Prism } from "./Prism.js";
 import type { ImageFormat, ImageServingConfig } from "./types.js";
@@ -123,9 +124,9 @@ function count(
 	maximum = Number.MAX_SAFE_INTEGER,
 ): number {
 	if (!Number.isInteger(value) || value < minimum || value > maximum) {
-		throw new Error(
-			`[prism] images.serve.${name} must be an integer from ${minimum} to ${maximum}, got ${value}.`,
-		);
+		throw new E_PRISM_INVALID_SERVE_CONFIG([
+			`images.serve.${name} must be an integer from ${minimum} to ${maximum}, got ${value}.`,
+		]);
 	}
 	return value;
 }
@@ -550,7 +551,7 @@ function identify(images: Prism, bytes: Buffer): Description {
 			},
 		};
 	} catch (error) {
-		if (error instanceof PrismError && SETTLED_REFUSALS.has(error.code)) {
+		if (hasCode(error, SETTLED_REFUSALS)) {
 			return { kind: "refused", notAnImage: isNotAnImage(error) };
 		}
 		throw error;
@@ -609,7 +610,7 @@ class SourceCatalogue {
 		try {
 			this.#images.inspect(head);
 		} catch (error) {
-			if (error instanceof PrismError && SIGNATURE_REFUSALS.has(error.code)) {
+			if (hasCode(error, SIGNATURE_REFUSALS)) {
 				return { kind: "refused", notAnImage: isNotAnImage(error) };
 			}
 		}
@@ -766,7 +767,16 @@ interface SourceInfo {
 const NOT_AN_IMAGE = new Set(["E_PRISM_UNKNOWN_FORMAT", "E_PRISM_EMPTY_INPUT"]);
 
 function isNotAnImage(error: unknown): boolean {
-	return error instanceof PrismError && NOT_AN_IMAGE.has(error.code);
+	return hasCode(error, NOT_AN_IMAGE);
+}
+
+/** Whether `error` is a coded error whose code is one of `codes`. */
+function hasCode(error: unknown, codes: ReadonlySet<string>): boolean {
+	return (
+		error instanceof Exception &&
+		error.code !== undefined &&
+		codes.has(error.code)
+	);
 }
 
 /**

@@ -5,22 +5,18 @@
  * is proved in the engine (crates/prism-engine/src/qr/, decoded by rxing —
  * ZXing, the decoder behind most phone scanners).
  */
+import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
-import {
-	Prism,
-	PrismError,
-	type QRCodeImageType,
-	qrcode,
-} from "../../src/index.js";
+import { Prism, type QRCodeImageType, qrcode } from "../../src/index.js";
 
 const URI = "otpauth://totp/Acme:ada?secret=JBSWY3DPEHPK3PXP&issuer=Acme";
 const prism = new Prism({
 	limits: { allowedFormats: ["png", "webp", "avif"] },
 });
 
-async function refusal(promise: Promise<unknown>): Promise<PrismError> {
+async function refusal(promise: Promise<unknown>): Promise<Exception> {
 	const error = await promise.catch((caught: unknown) => caught);
-	if (!(error instanceof PrismError)) throw new Error("expected a PrismError");
+	if (!(error instanceof Exception)) throw new Error("expected an Exception");
 	return error;
 }
 

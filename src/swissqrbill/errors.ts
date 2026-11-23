@@ -3,7 +3,7 @@
  * so code that branched on `error.code` keeps working.
  */
 
-import { PrismError } from "../errors.js";
+import { Exception } from "@c9up/flare";
 
 export const ValidationErrors = {
 	ACCOUNT_IS_QR_IBAN_BUT_REFERENCE_IS_MISSING:
@@ -99,11 +99,13 @@ export const ValidationErrors = {
 export type ValidationErrorCode = keyof typeof ValidationErrors;
 
 /**
- * A QR-bill the Swiss rules refuse. The code is `swissqrbill`'s, passed
- * through verbatim rather than renamed under `E_PRISM_`: it already names the
- * failure, and an application moving over keeps its `switch`.
+ * A QR-bill the Swiss rules refuse: `swissqrbill`'s own class, kept under its
+ * name on this `swissqrbill` entry, as a flare `Exception`. The code is
+ * `swissqrbill`'s, passed through verbatim rather than renamed under
+ * `E_PRISM_`: it already names the failure, and an application moving over
+ * keeps its `switch`.
  */
-export class ValidationError extends PrismError {
+export class ValidationError extends Exception {
 	override readonly code: ValidationErrorCode;
 
 	/** @internal */
@@ -112,7 +114,7 @@ export class ValidationError extends PrismError {
 		for (const [key, value] of Object.entries(params ?? {})) {
 			message = message.replace(`{${key}}`, value);
 		}
-		super(code, message);
+		super(message, { code });
 		this.code = code;
 	}
 }

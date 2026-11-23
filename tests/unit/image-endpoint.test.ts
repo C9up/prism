@@ -833,6 +833,9 @@ describe("what producing a variant costs", () => {
 			expect(() => mount({ roots: ["/nowhere"], ...serve })).toThrow(
 				/images\.serve\./,
 			);
+			expect(() => mount({ roots: ["/nowhere"], ...serve })).toThrow(
+				expect.objectContaining({ code: "E_PRISM_INVALID_SERVE_CONFIG" }),
+			);
 		}
 	});
 });

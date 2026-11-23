@@ -13,12 +13,8 @@
 // Contributes this package's tokens to ream's ContainerBindings. Type-only.
 import "./augmentations.js";
 
-export {
-	PRISM_CODES,
-	type PrismCode,
-	PrismError,
-	PrismNativeRequiredError,
-} from "./errors.js";
+export { PRISM_CODES, type PrismCode } from "./engineErrors.js";
+export * as errors from "./errors.js";
 export {
 	DEFAULT_WIDTHS,
 	type ImageHttpContext,

@@ -10,7 +10,8 @@
  * a coded error. Both translations live here so neither leaks outward.
  */
 
-import { fromEngine, PrismNativeRequiredError } from "./errors.js";
+import { fromEngine } from "./engineErrors.js";
+import { E_PRISM_NATIVE_REQUIRED } from "./errors.js";
 import type {
 	JsLimits,
 	JsOperation,
@@ -67,7 +68,7 @@ function unavailableReason(): string {
 
 function engine(): NativePrism {
 	if (native === undefined) {
-		throw new PrismNativeRequiredError(unavailableReason());
+		throw new E_PRISM_NATIVE_REQUIRED([unavailableReason()]);
 	}
 	return native;
 }

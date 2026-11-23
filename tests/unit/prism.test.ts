@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crc32, deflateSync } from "node:zlib";
+import { Exception } from "@c9up/flare";
 import { describe, expect, it } from "vitest";
-import { PrismError } from "../../src/errors.js";
 import { isNativeAvailable, Prism } from "../../src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -73,7 +73,7 @@ describe("inspect", () => {
 
 	it("refuses bytes that are not an image", () => {
 		const error = catchError(() => images.inspect(Buffer.from("<svg/>")));
-		expect(error).toBeInstanceOf(PrismError);
+		expect(error).toBeInstanceOf(Exception);
 		expect(error?.code).toBe("E_PRISM_UNKNOWN_FORMAT");
 	});
 
@@ -907,12 +907,12 @@ function detailedPng(width: number, height: number): Buffer {
 	});
 }
 
-/** Capture a synchronous throw as a `PrismError`, or `undefined`. */
-function catchError(work: () => unknown): PrismError | undefined {
+/** Capture a synchronous throw as an `Exception`, or `undefined`. */
+function catchError(work: () => unknown): Exception | undefined {
 	try {
 		work();
 		return undefined;
 	} catch (error) {
-		return error instanceof PrismError ? error : undefined;
+		return error instanceof Exception ? error : undefined;
 	}
 }

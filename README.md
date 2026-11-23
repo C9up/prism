@@ -169,7 +169,7 @@ symbol is encoded by the engine with the same mask upstream's encoder picks,
 so it is the same QR code, module for module.
 
 A `ValidationError` carries `swissqrbill`'s own code (`CREDITOR_ACCOUNT_IS_INVALID`,
-`QR_REFERENCE_IS_INVALID`…) and extends `PrismError`. Named differences: a
+`QR_REFERENCE_IS_INVALID`…) and is a flare `Exception`. Named differences: a
 payload too long for the symbol is refused by the constructor, with
 `E_PRISM_QR_TOO_LONG`; the SVG's QR code is one path (about 12 KB for the
 whole slip, where a rectangle per module makes it 210); SVG attributes are
