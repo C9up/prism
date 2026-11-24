@@ -11,7 +11,13 @@ export default defineConfig({
     maxPixels: Number(env.get('IMAGE_MAX_PIXELS', '50000000')),
     // 64 MiB.
     maxBytes: 64 * 1024 * 1024,
+    // What one pipeline may hold, in bytes: the decoded image, a resize's
+    // float intermediate (16 bytes per pixel), the output. 512 MiB.
+    maxMemory: 512 * 1024 * 1024,
   },
+
+  // Pipelines run at once. Each may hold up to maxMemory.
+  concurrency: 2,
 
   // Default output quality for formats that have the knob.
   quality: 82,

@@ -47,6 +47,7 @@ import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
 	type FileHandle,
+	lstat,
 	mkdir,
 	open,
 	readdir,
@@ -54,13 +55,21 @@ import {
 	readlink,
 	realpath,
 	rename,
+	rm,
 	stat,
 	unlink,
 	writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, resolve as resolvePath, sep } from "node:path";
+import {
+	isAbsolute,
+	join,
+	relative,
+	resolve as resolvePath,
+	sep,
+} from "node:path";
 import { Exception } from "@c9up/flare";
 import { E_PRISM_INVALID_SERVE_CONFIG } from "./errors.js";
+import { Gate } from "./gate.js";
 import { openedPathNative } from "./native.js";
 import type { Prism } from "./Prism.js";
 import type { ImageFormat, ImageServingConfig } from "./types.js";
@@ -108,7 +117,9 @@ interface ResolvedConfig {
 	quality: number;
 	cacheDir: string | undefined;
 	memoryCacheBytes: number;
+	maxCacheBytes: number;
 	maxAge: number;
+	cacheControl: "public" | "private" | false;
 	maxBytes: number;
 	concurrency: number;
 	queueLimit: number;
@@ -129,6 +140,19 @@ function count(
 		]);
 	}
 	return value;
+}
+
+/** Who may store an answer, refused at mount when it is not a known value. */
+function cacheScope(
+	value: ImageServingConfig["cacheControl"],
+): "public" | "private" | false {
+	if (value === undefined) return "public";
+	if (value === "public" || value === "private" || value === false) {
+		return value;
+	}
+	throw new E_PRISM_INVALID_SERVE_CONFIG([
+		`images.serve.cacheControl must be "public", "private" or false, got ${String(value)}.`,
+	]);
 }
 
 /** The engine's own default for `limits.maxBytes`. */
@@ -153,7 +177,13 @@ function resolveConfig(
 			config.memoryCacheBytes ?? 32 * 1024 * 1024,
 			0,
 		),
+		maxCacheBytes: count(
+			"maxCacheBytes",
+			config.maxCacheBytes ?? 1024 * 1024 * 1024,
+			0,
+		),
 		maxAge: config.maxAge ?? 31_536_000,
+		cacheControl: cacheScope(config.cacheControl),
 		maxBytes: images.config().limits?.maxBytes ?? DEFAULT_MAX_BYTES,
 		// Below libuv's default pool of four, so a burst of renders leaves
 		// threads for the rest of the application.
@@ -165,48 +195,6 @@ function resolveConfig(
 		effort: count("effort", config.effort ?? 1, 0, 9),
 		autoOrient: images.config().autoOrient !== false,
 	};
-}
-
-/**
- * At most `limit` renders at once, at most `queueLimit` waiting.
- *
- * A slot is a release function; `undefined` means the queue is full and the
- * request should be turned away now rather than wait behind it.
- */
-class RenderGate {
-	readonly #limit: number;
-	readonly #queueLimit: number;
-	#active = 0;
-	readonly #waiting: (() => void)[] = [];
-
-	constructor(limit: number, queueLimit: number) {
-		this.#limit = limit;
-		this.#queueLimit = queueLimit;
-	}
-
-	acquire(): Promise<() => void> | undefined {
-		if (this.#active < this.#limit) {
-			this.#active++;
-			return Promise.resolve(this.#releaser());
-		}
-		if (this.#waiting.length >= this.#queueLimit) return undefined;
-		return new Promise((resolve) => {
-			this.#waiting.push(() => resolve(this.#releaser()));
-		});
-	}
-
-	#releaser(): () => void {
-		let released = false;
-		return () => {
-			if (released) return;
-			released = true;
-			const next = this.#waiting.shift();
-			// The slot passes straight to the next in line, so `#active`
-			// only drops when nobody is waiting.
-			if (next !== undefined) next();
-			else this.#active--;
-		};
-	}
 }
 
 /**
@@ -526,6 +514,7 @@ const SETTLED_REFUSALS = new Set([
 	"E_PRISM_FORMAT_NOT_ALLOWED",
 	"E_PRISM_INPUT_TOO_LARGE",
 	"E_PRISM_TOO_MANY_PIXELS",
+	"E_PRISM_MEMORY_LIMIT",
 	"E_PRISM_ZERO_DIMENSION",
 	"E_PRISM_UNREADABLE",
 	"E_PRISM_DECODE_FAILED",
@@ -571,12 +560,12 @@ class SourceCatalogue {
 	static readonly ENTRIES = 1024;
 
 	readonly #images: Prism;
-	readonly #gate: RenderGate;
+	readonly #gate: Gate;
 	readonly #entries = new Map<string, Description>();
 	/** Identifications in flight, so N requests at once read the source once. */
 	readonly #pending = new Map<string, Promise<Description | undefined>>();
 
-	constructor(images: Prism, gate: RenderGate) {
+	constructor(images: Prism, gate: Gate) {
 		this.#images = images;
 		this.#gate = gate;
 	}
@@ -658,6 +647,8 @@ interface DiskSlot {
 	directory: string;
 	version: string;
 	file: string;
+	/** The source's real path, recorded in its directory for the sweep. */
+	source: string;
 }
 
 function hash(parts: readonly (string | number)[], length: number): string {
@@ -667,63 +658,202 @@ function hash(parts: readonly (string | number)[], length: number): string {
 		.slice(0, length);
 }
 
-function diskSlot(
-	cacheDir: string | undefined,
-	source: { path: string; size: number; mtimeMs: number },
-	key: string,
-): DiskSlot | undefined {
-	if (cacheDir === undefined) return undefined;
-	const directory = join(cacheDir, hash([source.path], 32));
-	const version = hash([source.size, source.mtimeMs], 16);
-	return { directory, version, file: join(directory, `${version}-${key}`) };
-}
+/**
+ * The file in each source directory that names the source, so a sweep can
+ * tell the directory of a deleted file. Not a variant name: those start with
+ * a hexadecimal version.
+ */
+const SOURCE_MARKER = ".source";
 
-async function readCached(
-	slot: DiskSlot | undefined,
-): Promise<Buffer | undefined> {
-	if (slot === undefined) return undefined;
-	try {
-		return await readFile(slot.file);
-	} catch {
-		return undefined;
+/**
+ * Rendered variants on disk, bounded.
+ *
+ * Keyed by source path, a directory outlives a source that is deleted or
+ * renamed: an application that stores each upload under a fresh name and
+ * deletes the previous one would grow the cache by a full set of variants per
+ * upload. So a source found missing loses its directory, and past
+ * `maxCacheBytes` a sweep drops the directories of sources that no longer
+ * exist, then the oldest variants, until the cache is back under nine tenths
+ * of the bound.
+ */
+class DiskCache {
+	readonly #root: string;
+	readonly #limit: number;
+	/** Bytes on disk as last measured plus what was written since. */
+	#bytes: number | undefined;
+	#sweeping: Promise<void> | undefined;
+
+	constructor(root: string, limit: number) {
+		this.#root = root;
+		this.#limit = limit;
+	}
+
+	slot(
+		source: { path: string; size: number; mtimeMs: number },
+		key: string,
+	): DiskSlot {
+		const directory = this.#directoryOf(source.path);
+		const version = hash([source.size, source.mtimeMs], 16);
+		return {
+			directory,
+			version,
+			file: join(directory, `${version}-${key}`),
+			source: source.path,
+		};
+	}
+
+	async read(slot: DiskSlot): Promise<Buffer | undefined> {
+		try {
+			return await readFile(slot.file);
+		} catch {
+			return undefined;
+		}
+	}
+
+	async write(slot: DiskSlot, bytes: Buffer): Promise<void> {
+		// Write then rename: a reader that opens the file mid-write otherwise
+		// gets a truncated image, and a truncated image is cached forever.
+		const temporary = `${slot.file}.${process.pid}.tmp`;
+		try {
+			await mkdir(slot.directory, { recursive: true });
+			await writeFile(join(slot.directory, SOURCE_MARKER), slot.source);
+			await writeFile(temporary, bytes);
+			await rename(temporary, slot.file);
+		} catch {
+			// A cache that cannot be written is slow, not broken — but it must
+			// not keep the half it did write.
+			await unlink(temporary).catch(() => undefined);
+			return;
+		}
+		const pruned = await this.#pruneVersions(slot);
+		if (this.#bytes !== undefined) this.#bytes += bytes.length - pruned;
+		if (
+			this.#limit > 0 &&
+			(this.#bytes ?? Number.POSITIVE_INFINITY) > this.#limit
+		) {
+			await this.#sweep();
+		}
+	}
+
+	/** Drop the directory of `path` when no file is there any more. */
+	async forget(path: string): Promise<void> {
+		try {
+			await lstat(path);
+			return;
+		} catch {
+			// Gone: its variants can never be served again.
+		}
+		await rm(this.#directoryOf(path), { recursive: true, force: true }).catch(
+			() => undefined,
+		);
+	}
+
+	#directoryOf(path: string): string {
+		return join(this.#root, hash([path], 32));
+	}
+
+	/**
+	 * Delete what an earlier version of the source left in its directory.
+	 * The bytes deleted.
+	 */
+	async #pruneVersions(slot: DiskSlot): Promise<number> {
+		let entries: string[];
+		try {
+			entries = await readdir(slot.directory);
+		} catch {
+			return 0;
+		}
+		const current = `${slot.version}-`;
+		const sizes = await Promise.all(
+			entries
+				.filter((name) => name !== SOURCE_MARKER && !name.startsWith(current))
+				.map((name) => removeFile(join(slot.directory, name))),
+		);
+		return sizes.reduce((total, size) => total + size, 0);
+	}
+
+	/** One sweep at a time; a write that finds one running leaves it be. */
+	#sweep(): Promise<void> {
+		this.#sweeping ??= this.#measureAndTrim().finally(() => {
+			this.#sweeping = undefined;
+		});
+		return this.#sweeping;
+	}
+
+	async #measureAndTrim(): Promise<void> {
+		let directories: string[];
+		try {
+			directories = await readdir(this.#root);
+		} catch {
+			return;
+		}
+		const variants: { file: string; size: number; mtimeMs: number }[] = [];
+		for (const name of directories) {
+			const directory = join(this.#root, name);
+			if (await orphaned(directory)) {
+				await rm(directory, { recursive: true, force: true }).catch(
+					() => undefined,
+				);
+				continue;
+			}
+			let files: string[];
+			try {
+				files = await readdir(directory);
+			} catch {
+				continue;
+			}
+			for (const file of files) {
+				if (file === SOURCE_MARKER) continue;
+				try {
+					const info = await stat(join(directory, file));
+					variants.push({
+						file: join(directory, file),
+						size: info.size,
+						mtimeMs: info.mtimeMs,
+					});
+				} catch {
+					// Deleted meanwhile.
+				}
+			}
+		}
+		let total = variants.reduce((sum, variant) => sum + variant.size, 0);
+		const target = Math.floor(this.#limit * 0.9);
+		variants.sort((a, b) => a.mtimeMs - b.mtimeMs);
+		for (const variant of variants) {
+			if (total <= target) break;
+			total -= await removeFile(variant.file);
+		}
+		this.#bytes = total;
 	}
 }
 
-async function writeCached(
-	slot: DiskSlot | undefined,
-	bytes: Buffer,
-): Promise<void> {
-	if (slot === undefined) return;
-	// Write then rename: a reader that opens the file mid-write otherwise
-	// gets a truncated image, and a truncated image is cached forever.
-	const temporary = `${slot.file}.${process.pid}.tmp`;
+/** Delete a file; the bytes it held, 0 when it was already gone. */
+async function removeFile(file: string): Promise<number> {
 	try {
-		await mkdir(slot.directory, { recursive: true });
-		await writeFile(temporary, bytes);
-		await rename(temporary, slot.file);
+		const { size } = await stat(file);
+		await unlink(file);
+		return size;
 	} catch {
-		// A cache that cannot be written is slow, not broken — but it must
-		// not keep the half it did write.
-		await unlink(temporary).catch(() => undefined);
-		return;
+		return 0;
 	}
-	await pruneVersions(slot);
 }
 
-/** Delete what an earlier version of the source left in its directory. */
-async function pruneVersions(slot: DiskSlot): Promise<void> {
-	let entries: string[];
+/** Whether a source directory's source no longer exists. */
+async function orphaned(directory: string): Promise<boolean> {
+	let source: string;
 	try {
-		entries = await readdir(slot.directory);
+		source = await readFile(join(directory, SOURCE_MARKER), "utf8");
 	} catch {
-		return;
+		// No record: a directory this layout did not write, or one whose
+		// first write failed half-way. Neither can be served.
+		return true;
 	}
-	const current = `${slot.version}-`;
-	await Promise.all(
-		entries
-			.filter((name) => !name.startsWith(current))
-			.map((name) => unlink(join(slot.directory, name)).catch(() => undefined)),
-	);
+	try {
+		await lstat(source);
+		return false;
+	} catch {
+		return true;
+	}
 }
 
 /**
@@ -793,10 +923,60 @@ function harden(response: ImageResponse): void {
 }
 
 /**
+ * What `src` would name under each root, as the real path a source there
+ * would have — so the cache directory of a source that is gone can be found.
+ */
+async function namedPaths(
+	src: string,
+	roots: readonly string[],
+): Promise<string[]> {
+	if (src.startsWith("/") && !src.startsWith("//")) src = src.slice(1);
+	if (src.length === 0 || src.includes("\0") || isAbsolute(src)) return [];
+	const paths: string[] = [];
+	for (const root of roots) {
+		const candidate = resolvePath(join(root, src));
+		if (!within(root, candidate)) continue;
+		try {
+			paths.push(join(await realpath(root), relative(root, candidate)));
+		} catch {
+			// A root that does not exist holds no source.
+		}
+	}
+	return paths;
+}
+
+/**
+ * Variants whose render was refused for a reason the source's bytes settle,
+ * so a refused file is not decoded again by every request naming it. Keyed by
+ * variant, since one width can fit the memory limit where another does not;
+ * the key covers the source version, so replacing the file clears it.
+ */
+class RefusedRenders {
+	static readonly ENTRIES = 1024;
+	readonly #entries = new Map<string, boolean>();
+
+	/** `true` when the refusal was "not an image", `undefined` when none. */
+	get(key: string): boolean | undefined {
+		return this.#entries.get(key);
+	}
+
+	remember(key: string, notAnImage: boolean): void {
+		if (this.#entries.size >= RefusedRenders.ENTRIES) {
+			const oldest = this.#entries.keys().next();
+			if (oldest.done !== true) this.#entries.delete(oldest.value);
+		}
+		this.#entries.set(key, notAnImage);
+	}
+}
+
+/**
  * Mount the endpoint.
  *
  * Returns whatever the router returns for the route, so a caller can apply its
  * own middleware — an image behind authentication is a normal thing to want.
+ * Such a route must not answer `public` (the default): a shared cache in
+ * front of the application may store the image and serve it to anyone. Set
+ * `cacheControl: "private"` for it.
  */
 export function registerImageRoute(
 	router: ImageRouter,
@@ -804,12 +984,21 @@ export function registerImageRoute(
 	config: ImageServingConfig,
 ): unknown {
 	const settings = resolveConfig(config, images);
-	const gate = new RenderGate(settings.concurrency, settings.queueLimit);
+	const gate = new Gate(settings.concurrency, settings.queueLimit);
 	const catalogue = new SourceCatalogue(images, gate);
 	const memory =
 		settings.cacheDir === undefined && settings.memoryCacheBytes > 0
 			? new MemoryCache(settings.memoryCacheBytes)
 			: undefined;
+	const disk =
+		settings.cacheDir === undefined
+			? undefined
+			: new DiskCache(settings.cacheDir, settings.maxCacheBytes);
+	const refused = new RefusedRenders();
+	const cacheControl = (directives: string): string | undefined =>
+		settings.cacheControl === false
+			? undefined
+			: `${settings.cacheControl}, ${directives}`;
 
 	return router.get(settings.path, async (ctx) => {
 		harden(ctx.response);
@@ -888,6 +1077,11 @@ export function registerImageRoute(
 
 		const file = await resolveSource(src, settings.roots);
 		if (file === undefined) {
+			if (disk !== undefined) {
+				for (const path of await namedPaths(src, settings.roots)) {
+					await disk.forget(path);
+				}
+			}
 			notFound();
 			return;
 		}
@@ -956,21 +1150,30 @@ export function registerImageRoute(
 			// Answered before any read: a browser revalidating fifteen variants of
 			// one image should cost fifteen header comparisons.
 			if (ctx.request.header("if-none-match") === etag) {
+				const scope = cacheControl(`max-age=${settings.maxAge}`);
+				if (scope !== undefined) ctx.response.header("cache-control", scope);
 				ctx.response
 					.header("etag", etag)
-					.header("cache-control", `public, max-age=${settings.maxAge}`)
 					.status(304)
 					.sendBuffer(Buffer.alloc(0));
 				return;
 			}
 
+			const known = refused.get(key);
+			if (known !== undefined) {
+				if (known) notFound();
+				else unprocessable();
+				return;
+			}
+
 			const target = output;
-			const onDisk = diskSlot(
-				settings.cacheDir,
+			const onDisk = disk?.slot(
 				{ path: file.path, size: info.size, mtimeMs: info.mtimeMs },
 				key,
 			);
-			let bytes = memory?.get(key) ?? (await readCached(onDisk));
+			let bytes =
+				memory?.get(key) ??
+				(onDisk === undefined ? undefined : await disk?.read(onDisk));
 			if (bytes === undefined) {
 				let work = inFlight.get(key);
 				if (work === undefined) {
@@ -991,7 +1194,7 @@ export function registerImageRoute(
 								settings.effort,
 							);
 							memory?.set(key, rendered);
-							await writeCached(onDisk, rendered);
+							if (onDisk !== undefined) await disk?.write(onDisk, rendered);
 							return rendered;
 						} finally {
 							release();
@@ -1009,22 +1212,23 @@ export function registerImageRoute(
 					// No passthrough. What leaves this route is something the
 					// engine re-encoded, or nothing: the original of a file that
 					// failed to render is exactly the file nobody vetted.
+					if (hasCode(error, SETTLED_REFUSALS)) {
+						refused.remember(key, isNotAnImage(error));
+					}
 					if (isNotAnImage(error)) notFound();
 					else unprocessable();
 					return;
 				}
 			}
 
+			// `immutable` because the key covers the source's mtime: an edited
+			// file produces a different key, so nothing a browser holds can
+			// ever be stale.
+			const scope = cacheControl(`max-age=${settings.maxAge}, immutable`);
+			if (scope !== undefined) ctx.response.header("cache-control", scope);
 			ctx.response
 				.type(`image/${target}`)
 				.header("etag", etag)
-				// `immutable` because the key covers the source's mtime: an edited
-				// file produces a different key, so nothing a browser holds can
-				// ever be stale.
-				.header(
-					"cache-control",
-					`public, max-age=${settings.maxAge}, immutable`,
-				)
 				.sendBuffer(bytes);
 		} finally {
 			await file.handle.close().catch(() => undefined);

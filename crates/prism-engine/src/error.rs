@@ -26,6 +26,13 @@ pub enum EngineError {
         pixels: u64,
         limit: u64,
     },
+    /// A step would hold more bytes than `max_memory` allows — a decoded
+    /// buffer, a resample's intermediate, an encoder's copy — refused before
+    /// it is allocated.
+    MemoryLimit {
+        needed: u64,
+        limit: u64,
+    },
     ZeroDimension,
     UnknownFormat,
     UnsupportedFormat(String),
@@ -58,6 +65,7 @@ impl EngineError {
             Self::Empty => "EMPTY_INPUT",
             Self::TooLarge { .. } => "INPUT_TOO_LARGE",
             Self::TooManyPixels { .. } | Self::OutputTooLarge { .. } => "TOO_MANY_PIXELS",
+            Self::MemoryLimit { .. } => "MEMORY_LIMIT",
             Self::ZeroDimension => "ZERO_DIMENSION",
             Self::UnknownFormat => "UNKNOWN_FORMAT",
             Self::UnsupportedFormat(_) => "UNSUPPORTED_FORMAT",
@@ -93,6 +101,10 @@ impl fmt::Display for EngineError {
             } => write!(
                 f,
                 "the operation would produce a {width}x{height} image, {pixels} pixels, over the {limit}-pixel limit"
+            ),
+            Self::MemoryLimit { needed, limit } => write!(
+                f,
+                "the image needs about {needed} bytes to process, over the {limit}-byte memory limit"
             ),
             Self::ZeroDimension => write!(f, "the image declares a zero width or height"),
             Self::UnknownFormat => write!(f, "the bytes do not identify as any known image format"),

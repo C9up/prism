@@ -31,6 +31,16 @@ export const E_PRISM_TOO_MANY_PIXELS = createError<[string]>(
 	422,
 );
 
+/**
+ * A step of the pipeline would hold more than `maxMemory` bytes — the
+ * decoded image, a resize's intermediate, an encoder's copy.
+ */
+export const E_PRISM_MEMORY_LIMIT = createError<[string]>(
+	"%s",
+	"E_PRISM_MEMORY_LIMIT",
+	422,
+);
+
 /** The image has a zero width or height. */
 export const E_PRISM_ZERO_DIMENSION = createError<[string]>(
 	"%s",
@@ -124,10 +134,12 @@ export const E_PRISM_INTERNAL_PANIC = createError<[string]>(
 /** The engine failed without a code prism knows. */
 export const E_PRISM_ENGINE = createError<[string]>("%s", "E_PRISM_ENGINE");
 
-/** An operation needs the Rust engine and it is not loaded. */
-export const E_PRISM_NATIVE_REQUIRED = createError<[string]>(
-	"The Rust image engine is required but not loaded — %s.\n" +
-		"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
+/**
+ * An operation needs the Rust engine and it is not loaded. The message names
+ * the platform package to install; the load error is its `cause`.
+ */
+export const E_PRISM_NATIVE_REQUIRED = createError<[fix: string]>(
+	"The Rust image engine is required but not loaded.\n  Fix: %s",
 	"E_PRISM_NATIVE_REQUIRED",
 );
 

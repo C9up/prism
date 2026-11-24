@@ -7,6 +7,7 @@
  * decoding and re-encoding the image twice.
  */
 
+import { Gate } from "./gate.js";
 import { inspectNative, processNative } from "./native.js";
 import type {
 	CompositeOptions,
@@ -24,14 +25,19 @@ import type {
 	WatermarkTextOptions,
 } from "./types.js";
 
+/** Pipelines one `Prism` runs at once when its config names no number. */
+const DEFAULT_CONCURRENCY = 2;
+
 export class Pipeline {
 	readonly #input: Buffer;
 	readonly #config: PrismConfig;
+	readonly #gate: Gate;
 	readonly #operations: Operation[] = [];
 
-	constructor(input: Buffer, config: PrismConfig) {
+	constructor(input: Buffer, config: PrismConfig, gate?: Gate) {
 		this.#input = input;
 		this.#config = config;
+		this.#gate = gate ?? new Gate(concurrencyOf(config));
 	}
 
 	/** The operations queued so far, in order. */
@@ -150,22 +156,26 @@ export class Pipeline {
 	 * Run everything and encode.
 	 *
 	 * The one call that touches the engine. A pipeline is inert until this.
+	 * It runs in one of its `Prism`'s `concurrency` slots, waiting for one
+	 * when they are all taken.
 	 */
 	toBuffer(output: OutputOptions): Promise<Buffer> {
-		return processNative(
-			this.#input,
-			this.#operations,
-			{
-				...output,
-				// `??`, not a spread order. `{ quality: config, ...output }`
-				// looks like a default and is not: `output` carries
-				// `quality: undefined` whenever the caller omitted it, and
-				// spreading that OVER the config value silently discarded it.
-				// The configured quality never reached the encoder.
-				quality: output.quality ?? this.#config.quality,
-			},
-			this.#config.limits,
-			this.#config.autoOrient,
+		return this.#gate.run(() =>
+			processNative(
+				this.#input,
+				this.#operations,
+				{
+					...output,
+					// `??`, not a spread order. `{ quality: config, ...output }`
+					// looks like a default and is not: `output` carries
+					// `quality: undefined` whenever the caller omitted it, and
+					// spreading that OVER the config value silently discarded
+					// it. The configured quality never reached the encoder.
+					quality: output.quality ?? this.#config.quality,
+				},
+				this.#config.limits,
+				this.#config.autoOrient,
+			),
 		);
 	}
 
@@ -175,11 +185,31 @@ export class Pipeline {
 	}
 }
 
+/**
+ * The configured concurrency. A value that is not a positive integer reads
+ * as the default, as a non-positive limit does: reading it as "unbounded"
+ * is how the bound gets switched off by accident.
+ */
+function concurrencyOf(config: PrismConfig): number {
+	const value = config.concurrency;
+	return value !== undefined && Number.isInteger(value) && value > 0
+		? value
+		: DEFAULT_CONCURRENCY;
+}
+
 export class Prism {
 	readonly #config: PrismConfig;
+	/**
+	 * Every pipeline of this instance runs through it. Each may hold up to
+	 * `limits.maxMemory`; without a bound of its own, the libuv pool (four
+	 * threads) was the only one, and four uploads at once held four times
+	 * the worst case.
+	 */
+	readonly #gate: Gate;
 
 	constructor(config: PrismConfig = {}) {
 		this.#config = config;
+		this.#gate = new Gate(concurrencyOf(config));
 	}
 
 	/** The configuration this was built with. */
@@ -201,7 +231,7 @@ export class Prism {
 
 	/** Start a pipeline over an encoded image. */
 	edit(bytes: Buffer): Pipeline {
-		return new Pipeline(bytes, this.#config);
+		return new Pipeline(bytes, this.#config, this.#gate);
 	}
 }
 

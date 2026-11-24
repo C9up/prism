@@ -8,6 +8,7 @@
  * feature.
  */
 
+import { createHash } from "node:crypto";
 import {
 	lstat,
 	mkdir,
@@ -1070,7 +1071,10 @@ describe("caching", () => {
 	});
 });
 
-/** Every file under a cache directory, relative to it. */
+/**
+ * Every variant under a cache directory, relative to it — not the file each
+ * source directory keeps to name its source.
+ */
 async function cached(cacheDir: string): Promise<string[]> {
 	const entries = await readdir(cacheDir, {
 		recursive: true,
@@ -1079,7 +1083,7 @@ async function cached(cacheDir: string): Promise<string[]> {
 	return entries
 		.filter((entry) => entry.isFile())
 		.map((entry) => relative(cacheDir, join(entry.parentPath, entry.name)))
-		.filter((name) => !name.includes("occupied"));
+		.filter((name) => !name.includes("occupied") && !name.endsWith(".source"));
 }
 
 /** A small JPEG, encoded by the engine so it is a real one. */
@@ -1114,3 +1118,231 @@ function jpegWithExif(jpeg: Buffer, note: string): Buffer {
 		jpeg.subarray(2),
 	]);
 }
+
+describe("who may store an answer", () => {
+	it("answers public by default, for images anyone may see", async () => {
+		const { dir } = await root();
+		const request = mount({ roots: [dir], widths: [256] });
+		const first = await request({ src: "photo.png", w: "256" });
+		expect(first.headers["cache-control"]).toBe(
+			"public, max-age=31536000, immutable",
+		);
+		const again = await request(
+			{ src: "photo.png", w: "256" },
+			{ "if-none-match": first.headers.etag ?? "" },
+		);
+		expect(again.status).toBe(304);
+		expect(again.headers["cache-control"]).toBe("public, max-age=31536000");
+	});
+
+	it("answers private, 200 and 304 alike, for a route behind authentication", async () => {
+		const { dir } = await root();
+		const request = mount({
+			roots: [dir],
+			widths: [256],
+			cacheControl: "private",
+			maxAge: 600,
+		});
+		const first = await request({ src: "photo.png", w: "256" });
+		expect(first.status).toBe(200);
+		expect(first.headers["cache-control"]).toBe(
+			"private, max-age=600, immutable",
+		);
+		const again = await request(
+			{ src: "photo.png", w: "256" },
+			{ "if-none-match": first.headers.etag ?? "" },
+		);
+		expect(again.status).toBe(304);
+		expect(again.headers["cache-control"]).toBe("private, max-age=600");
+	});
+
+	it("sends no Cache-Control when told to, for a middleware that sets its own", async () => {
+		const { dir } = await root();
+		const request = mount({ roots: [dir], widths: [256], cacheControl: false });
+		const first = await request({ src: "photo.png", w: "256" });
+		expect(first.status).toBe(200);
+		expect(first.headers["cache-control"]).toBeUndefined();
+		const again = await request(
+			{ src: "photo.png", w: "256" },
+			{ "if-none-match": first.headers.etag ?? "" },
+		);
+		expect(again.status).toBe(304);
+		expect(again.headers["cache-control"]).toBeUndefined();
+		// A refusal still says no-store: it is about this file at this moment.
+		const missing = await request({ src: "nothing.png", w: "256" });
+		expect(missing.headers["cache-control"]).toBe("no-store");
+	});
+
+	it("refuses a scope it does not know at mount", () => {
+		const config = JSON.parse('{"roots":[],"cacheControl":"shared"}');
+		expect(() => mount(config)).toThrow(
+			expect.objectContaining({ code: "E_PRISM_INVALID_SERVE_CONFIG" }),
+		);
+	});
+});
+
+describe("a render the engine refused", () => {
+	it("is answered from memory, not decoded again by every request", async () => {
+		// 800x600 RGBA decodes to 1.9 MB; asking for 640 wide adds a float
+		// intermediate the 3 MB budget cannot hold, and 64 wide does not.
+		const engine = new Prism({ limits: { maxMemory: 3_000_000 } });
+		const { dir } = await root();
+		const request = mount({ roots: [dir], widths: [64, 640] }, engine);
+		const edit = vi.spyOn(engine, "edit");
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const answer = await request({ src: "photo.png", w: "640", f: "png" });
+			expect(answer.status).toBe(422);
+			expect(answer.headers["cache-control"]).toBe("no-store");
+		}
+		expect(edit).toHaveBeenCalledTimes(1);
+		// Per variant: a width that fits is still rendered.
+		expect(
+			(await request({ src: "photo.png", w: "64", f: "png" })).status,
+		).toBe(200);
+		// Per source version: the replaced file is tried again.
+		await writeFile(join(dir, "photo.png"), detailedPng(100, 75));
+		const when = new Date(Date.now() + 60_000);
+		await utimes(join(dir, "photo.png"), when, when);
+		expect(
+			(await request({ src: "photo.png", w: "640", f: "png" })).status,
+		).toBe(200);
+	});
+});
+
+describe("the variants of a source that is gone", () => {
+	/** Request every listed variant of `name`, then delete it. */
+	async function uploadServeDelete(
+		request: ReturnType<typeof mount>,
+		dir: string,
+		name: string,
+		widths: readonly number[],
+	): Promise<void> {
+		await writeFile(join(dir, name), detailedPng(300, 200));
+		for (const w of widths) {
+			for (const f of ["webp", "png"]) {
+				expect((await request({ src: name, w: String(w), f })).status).toBe(
+					200,
+				);
+			}
+		}
+		await rm(join(dir, name));
+	}
+
+	async function cachedBytes(cacheDir: string): Promise<number> {
+		let total = 0;
+		for (const name of await cached(cacheDir)) {
+			total += (await stat(join(cacheDir, name))).size;
+		}
+		return total;
+	}
+
+	it("are deleted when a request finds the source missing", async () => {
+		const { dir } = await root();
+		const cacheDir = join(dir, ".cache");
+		const widths = [64, 128];
+		const request = mount({ roots: [dir], widths, cacheDir });
+		await uploadServeDelete(request, dir, "avatar-1.png", widths);
+		expect(await cached(cacheDir)).toHaveLength(4);
+		const answer = await request({ src: "/avatar-1.png", w: "64", f: "png" });
+		expect(answer.status).toBe(404);
+		expect(await readdir(cacheDir)).toEqual([]);
+		// A source that IS there keeps its variants, whatever is asked of it.
+		expect(
+			(await request({ src: "photo.png", w: "64", f: "png" })).status,
+		).toBe(200);
+		await request({ src: "../outside.png", w: "64", f: "png" });
+		await request({ src: "photo.png\0", w: "64", f: "png" });
+		expect(await cached(cacheDir)).toHaveLength(1);
+	});
+
+	it("stay under maxCacheBytes, uploads under fresh names and all", async () => {
+		const { dir } = await root();
+		const cacheDir = join(dir, ".cache");
+		const widths = [16, 32, 48, 64, 96, 128, 256];
+		// One upload's 14 variants, measured first.
+		const probe = mount({
+			roots: [dir],
+			widths,
+			cacheDir: join(dir, ".probe"),
+		});
+		await uploadServeDelete(probe, dir, "probe.png", widths);
+		const set = await cachedBytes(join(dir, ".probe"));
+
+		const bound = 3 * set;
+		const request = mount({
+			roots: [dir],
+			widths,
+			cacheDir,
+			maxCacheBytes: bound,
+		});
+		for (let upload = 1; upload <= 5; upload++) {
+			await uploadServeDelete(
+				request,
+				dir,
+				`avatar-${upload}-${upload * 7919}.png`,
+				widths,
+			);
+			expect(
+				await cachedBytes(cacheDir),
+				`upload ${upload}`,
+			).toBeLessThanOrEqual(bound);
+		}
+		// Two sources that stay: when the cache goes over the bound, the
+		// deleted sources' variants go before any of theirs.
+		for (const name of ["kept.png", "late.png"]) {
+			await writeFile(join(dir, name), detailedPng(300, 200));
+			for (const w of widths) {
+				for (const f of ["webp", "png"]) {
+					expect((await request({ src: name, w: String(w), f })).status).toBe(
+						200,
+					);
+				}
+			}
+		}
+		expect(await cachedBytes(cacheDir)).toBeLessThanOrEqual(bound);
+		for (const name of ["kept.png", "late.png"]) {
+			const directory = createHash("sha256")
+				.update(await realpath(join(dir, name)))
+				.digest("hex")
+				.slice(0, 32);
+			expect(
+				(await cached(cacheDir)).filter((file) => file.startsWith(directory)),
+				name,
+			).toHaveLength(14);
+		}
+	});
+
+	it("is not bounded when maxCacheBytes is 0", async () => {
+		const { dir } = await root();
+		const cacheDir = join(dir, ".cache");
+		const widths = [64, 128];
+		const request = mount({ roots: [dir], widths, cacheDir, maxCacheBytes: 0 });
+		for (let upload = 1; upload <= 3; upload++) {
+			await uploadServeDelete(request, dir, `a-${upload}.png`, widths);
+		}
+		expect(await cached(cacheDir)).toHaveLength(12);
+	});
+
+	it("drops a directory that names no source, then the oldest variants", async () => {
+		const { dir } = await root();
+		const cacheDir = join(dir, ".cache");
+		await mkdir(join(cacheDir, "stray"), { recursive: true });
+		await writeFile(
+			join(cacheDir, "stray", "0000-left-behind"),
+			Buffer.alloc(64),
+		);
+		const request = mount({
+			roots: [dir],
+			widths: [64],
+			cacheDir,
+			maxCacheBytes: 1,
+		});
+		expect(
+			(await request({ src: "photo.png", w: "64", f: "png" })).status,
+		).toBe(200);
+		expect(await readdir(cacheDir)).not.toContain("stray");
+		// Over a one-byte bound, the variant just written goes too: the answer
+		// was already rendered, the cache only stops keeping it.
+		expect(await cached(cacheDir)).toEqual([]);
+	});
+});

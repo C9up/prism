@@ -10,6 +10,11 @@ export interface JsLimits {
 	/** Largest input accepted, in bytes. Default 67108864. */
 	maxBytes?: number;
 	/**
+	 * Largest working set one pipeline may hold, in bytes. Default
+	 * 536870912.
+	 */
+	maxMemory?: number;
+	/**
 	 * Formats this application will DECODE. Default jpeg, png, webp.
 	 *
 	 * Every decoder is compiled in; this is the runtime gate. Widening it

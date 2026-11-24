@@ -11,6 +11,7 @@ use image::DynamicImage;
 
 use crate::error::EngineError;
 use crate::exif::Orientation;
+use crate::guard::Limits;
 
 const FILTER: FilterType = FilterType::Lanczos3;
 
@@ -144,20 +145,72 @@ pub(crate) fn bound(width: u32, height: u32, max_pixels: u64) -> Result<(), Engi
     Ok(())
 }
 
-/// Bound a Lanczos resample of `image` to `width` x `height`.
+/// Bytes the pixels of `image` occupy.
+pub(crate) fn bytes_of(image: &DynamicImage) -> u64 {
+    image.as_bytes().len() as u64
+}
+
+/// Bytes of a `width` x `height` buffer at `bytes_per_pixel`.
+pub(crate) fn bytes_for(width: u32, height: u32, bytes_per_pixel: u64) -> u64 {
+    (u64::from(width) * u64::from(height)).saturating_mul(bytes_per_pixel)
+}
+
+/// Bytes one pixel of `image` takes.
+pub(crate) fn pixel_bytes(image: &DynamicImage) -> u64 {
+    u64::from(image.color().bytes_per_pixel())
+}
+
+/// Refuse a step whose working set would be over the memory ceiling.
 ///
-/// `imageops::resize` samples vertically first, into a 32-bit-float buffer of
-/// the SOURCE width by the TARGET height, so that intermediate is bounded too:
-/// a very wide source asked to become very tall builds it far larger than
-/// either end.
+/// `held` is what stays alive across the step — the image it reads, and any
+/// layer beside it — and `allocated` what the step adds before it can drop
+/// anything. The sum is the step's peak. What each step counts:
+///
+/// - decode: the decoded buffer (bit depth and channels from the header),
+///   plus the GIF frame buffer or WebP planes beside it; twice that when an
+///   EXIF orientation is applied, since rotating copies;
+/// - Lanczos resize: the source, a 16-byte-per-pixel float intermediate of
+///   SOURCE width x TARGET height, and the output (plus the crop of `cover`);
+/// - thumbnail and crop: the source and the output;
+/// - a filter: the source and one copy (two for the blurs, whose separable
+///   pass keeps a transient image);
+/// - composite: both layers, and an 8-bit RGBA copy of each;
+/// - encode: the image, the encoder's converted copy and its output.
+pub(crate) fn charge(held: u64, allocated: u64, max_memory: u64) -> Result<(), EngineError> {
+    let needed = held.saturating_add(allocated);
+    if needed > max_memory {
+        return Err(EngineError::MemoryLimit {
+            needed,
+            limit: max_memory,
+        });
+    }
+    Ok(())
+}
+
+/// Bound a Lanczos resample of `image` to `width` x `height`, then
+/// `extra` bytes more (the crop of a `cover`).
+///
+/// `imageops::resize` samples vertically first, into a 32-bit-float RGBA
+/// buffer of the SOURCE width by the TARGET height, so that intermediate is
+/// bounded too: a very wide source asked to become very tall builds it far
+/// larger than either end, and it is 16 bytes a pixel whatever the source's
+/// depth — the largest of the three buffers alive at once.
 fn bound_resample(
     image: &DynamicImage,
     width: u32,
     height: u32,
-    max_pixels: u64,
+    extra: u64,
+    limits: Limits,
 ) -> Result<(), EngineError> {
-    bound(width, height, max_pixels)?;
-    bound(image.width(), height, max_pixels)
+    bound(width, height, limits.max_pixels)?;
+    bound(image.width(), height, limits.max_pixels)?;
+    let intermediate = bytes_for(image.width(), height, 16);
+    let output = bytes_for(width, height, pixel_bytes(image));
+    charge(
+        bytes_of(image),
+        intermediate.saturating_add(output).saturating_add(extra),
+        limits.max_memory,
+    )
 }
 
 pub fn resize(
@@ -165,25 +218,26 @@ pub fn resize(
     width: Option<u32>,
     height: Option<u32>,
     fit: Fit,
-    max_pixels: u64,
+    limits: Limits,
 ) -> Result<DynamicImage, EngineError> {
     let (tw, th) = target(&image, width, height)?;
     let (w, h) = (image.width(), image.height());
     Ok(match fit {
         Fit::Fill => {
-            bound_resample(&image, tw, th, max_pixels)?;
+            bound_resample(&image, tw, th, 0, limits)?;
             image.resize_exact(tw, th, FILTER)
         }
         Fit::Contain => {
             let (cw, ch) = fitted(w, h, tw, th, false);
-            bound_resample(&image, cw, ch, max_pixels)?;
+            bound_resample(&image, cw, ch, 0, limits)?;
             image.resize(tw, th, FILTER)
         }
         Fit::Cover => {
             // Scaled to cover the box first, then cropped: the scaled
             // intermediate is the large one.
             let (cw, ch) = fitted(w, h, tw, th, true);
-            bound_resample(&image, cw, ch, max_pixels)?;
+            let cropped = bytes_for(tw, th, pixel_bytes(&image));
+            bound_resample(&image, cw, ch, cropped, limits)?;
             image.resize_to_fill(tw, th, FILTER)
         }
         Fit::Inside => {
@@ -191,7 +245,7 @@ pub fn resize(
                 image
             } else {
                 let (cw, ch) = fitted(w, h, tw, th, false);
-                bound_resample(&image, cw, ch, max_pixels)?;
+                bound_resample(&image, cw, ch, 0, limits)?;
                 image.resize(tw, th, FILTER)
             }
         }
@@ -204,6 +258,7 @@ pub fn crop(
     y: u32,
     width: u32,
     height: u32,
+    max_memory: u64,
 ) -> Result<DynamicImage, EngineError> {
     if width == 0 || height == 0 {
         return Err(EngineError::Geometry("a crop cannot be zero-sized".into()));
@@ -221,6 +276,11 @@ pub fn crop(
             image.height()
         )));
     }
+    charge(
+        bytes_of(&image),
+        bytes_for(width, height, pixel_bytes(&image)),
+        max_memory,
+    )?;
     Ok(image.crop_imm(x, y, width, height))
 }
 
@@ -251,13 +311,28 @@ pub fn flip(image: DynamicImage, axis: &str) -> Result<DynamicImage, EngineError
 ///
 /// Coordinates are signed so an overlay can hang off the edge — a watermark
 /// anchored to a corner is routinely larger than the margin it sits in.
-pub fn composite(base: DynamicImage, top: &DynamicImage, x: i64, y: i64) -> DynamicImage {
+pub fn composite(
+    base: DynamicImage,
+    top: &DynamicImage,
+    x: i64,
+    y: i64,
+    max_memory: u64,
+) -> Result<DynamicImage, EngineError> {
+    charge(
+        bytes_of(&base).saturating_add(bytes_of(top)),
+        bytes_for(base.width(), base.height(), 4).saturating_add(bytes_for(
+            top.width(),
+            top.height(),
+            4,
+        )),
+        max_memory,
+    )?;
     // To RGBA once: `overlay` blends per channel, and a base without an alpha
     // channel would otherwise drop the overlay's transparency and paint its
     // bounding box.
     let mut canvas = base.to_rgba8();
     overlay(&mut canvas, &top.to_rgba8(), x, y);
-    DynamicImage::ImageRgba8(canvas)
+    Ok(DynamicImage::ImageRgba8(canvas))
 }
 
 // ─── Filters ────────────────────────────────────────────────────────
@@ -383,17 +458,25 @@ pub fn thumbnail(
     width: Option<u32>,
     height: Option<u32>,
     exact: bool,
-    max_pixels: u64,
+    limits: Limits,
 ) -> Result<DynamicImage, EngineError> {
     let (tw, th) = target(&image, width, height)?;
     // A box sampler writes straight into the output, so the output is the
     // only buffer to bound.
+    let (ow, oh) = if exact {
+        (tw, th)
+    } else {
+        fitted(image.width(), image.height(), tw, th, false)
+    };
+    bound(ow, oh, limits.max_pixels)?;
+    charge(
+        bytes_of(&image),
+        bytes_for(ow, oh, pixel_bytes(&image)),
+        limits.max_memory,
+    )?;
     Ok(if exact {
-        bound(tw, th, max_pixels)?;
         image.thumbnail_exact(tw, th)
     } else {
-        let (cw, ch) = fitted(image.width(), image.height(), tw, th, false);
-        bound(cw, ch, max_pixels)?;
         image.thumbnail(tw, th)
     })
 }

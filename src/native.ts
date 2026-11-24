@@ -10,6 +10,7 @@
  * a coded error. Both translations live here so neither leaks outward.
  */
 
+import { arch, platform } from "node:process";
 import { fromEngine } from "./engineErrors.js";
 import { E_PRISM_NATIVE_REQUIRED } from "./errors.js";
 import type {
@@ -22,8 +23,15 @@ import type { Limits, Metadata, Operation, OutputOptions } from "./types.js";
 import {
 	hasFunctions,
 	loadNativeBinary,
-	unavailableReason as vendorUnavailableReason,
+	muslHint,
+	supportedTargets,
 } from "./vendor/nativeBinary.js";
+
+/**
+ * The npm name the platform packages derive from: `@c9up/prism-<suffix>`,
+ * one per target, each an optional dependency pinned to this version.
+ */
+const PACKAGE_NAME = "@c9up/prism";
 
 /**
  * What this package calls on the engine, typed as the Rust declares it.
@@ -51,26 +59,45 @@ function isNativePrism(value: unknown): value is NativePrism {
 	return hasFunctions(value, NATIVE_CALLS);
 }
 
-const attempt = loadNativeBinary(isNativePrism, NATIVE_CALLS);
-const native = attempt.loaded ? attempt.binary : undefined;
-const loadError = attempt.loaded ? undefined : attempt.cause;
+const attempt = loadNativeBinary(isNativePrism, NATIVE_CALLS, {
+	packageName: PACKAGE_NAME,
+});
 
 export function isNativeAvailable(): boolean {
-	return native !== undefined;
+	return attempt.loaded;
 }
 
-function unavailableReason(): string {
-	if (loadError !== undefined) {
-		return `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`;
+/**
+ * What to do about a missing engine, phrased for whoever has to fix it.
+ *
+ * An application installs the platform package; a checkout of prism builds
+ * the local binary. The load error itself is not in here: it names paths on
+ * the host, so it travels as the refusal's `cause` instead of its message.
+ */
+function remedy(
+	suffix: string | undefined,
+	platformPackage: string | undefined,
+): string {
+	if (suffix === undefined) {
+		return `no prebuilt binary for ${platform}-${arch}; prism ships one for ${supportedTargets().join(", ")}.`;
 	}
-	return vendorUnavailableReason();
+	if (platformPackage === undefined) {
+		return `index.${suffix}.node failed to load. Rebuild it: cd packages/prism && pnpm build:napi`;
+	}
+	return (
+		`install ${platformPackage} at the exact version of ${PACKAGE_NAME}: it is the optional dependency that carries the ${suffix} binary, ` +
+		"and an install that omits optional dependencies skips it. " +
+		`In a checkout of prism, build it instead: pnpm build:napi.${muslHint()}`
+	);
 }
 
+/** The engine, or a refusal naming the fix, with the load error as its cause. */
 function engine(): NativePrism {
-	if (native === undefined) {
-		throw new E_PRISM_NATIVE_REQUIRED([unavailableReason()]);
-	}
-	return native;
+	if (attempt.loaded) return attempt.binary;
+	throw new E_PRISM_NATIVE_REQUIRED(
+		[remedy(attempt.suffix, attempt.platformPackage)],
+		{ cause: attempt.cause },
+	);
 }
 
 function limitsOf(limits: Limits | undefined): JsLimits | undefined {
@@ -78,6 +105,7 @@ function limitsOf(limits: Limits | undefined): JsLimits | undefined {
 	return {
 		maxPixels: limits.maxPixels,
 		maxBytes: limits.maxBytes,
+		maxMemory: limits.maxMemory,
 		allowedFormats: limits.allowedFormats
 			? [...limits.allowedFormats]
 			: undefined,

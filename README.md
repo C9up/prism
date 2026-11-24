@@ -190,7 +190,16 @@ before anything is allocated:
 - **A pixel ceiling checked against the header.** A 40 KB PNG can declare
   50000x50000; decoding it asks for ten gigabytes before anything objects. The
   product is computed in 64 bits — in 32 it overflows to a small number for
-  exactly the largest image expressible.
+  exactly the largest image expressible. Every GIF frame is checked too, and a
+  WebP bitstream whose size is not its frame's is refused before it is decoded.
+- **Headers that expand are bounded.** A PNG's compressed ICC profile is
+  inflated up to 4 MiB (plus a few times the file for text chunks) and dropped
+  past that; an AVIF item located in more bytes than the file is refused before
+  it is assembled.
+- **A memory ceiling.** `limits.maxMemory` (512 MiB) bounds what one pipeline
+  holds: the decoded image, a resize's 16-byte-per-pixel float intermediate,
+  the output. A step over it is refused with `E_PRISM_MEMORY_LIMIT` before it
+  allocates, and `concurrency` (2) pipelines run at once per `Prism`.
 - **A panic net on every boundary.** A panic crossing NAPI takes the Node
   process down; on a worker thread it aborts outright.
 - **Overlays are guarded exactly like the input**, because a per-tenant
@@ -268,9 +277,10 @@ before blaming the crate.
 ### The size of the binary
 
 All fifteen formats take the native binary from roughly 2.3 MB to 11 MB, most
-of it the AVIF codec. Multiplied across prebuilt platforms that is the dominant
-cost of the package: an application that only handles jpeg, png and webp is
-paying for twelve codecs it will never allow. Making the set a build feature as
+of it the AVIF codec. An install downloads only its own platform's binary (see
+[The engine](#the-engine)), but that one binary is still the dominant cost of
+the package: an application that only handles jpeg, png and webp is paying for
+twelve codecs it will never allow. Making the set a build feature as
 well as a runtime one would fix that, and has not been done.
 
 ## Colour
@@ -307,7 +317,9 @@ await images.edit(scan).toBuffer({ format: 'png', depth: 16 })
 
 Only PNG and TIFF carry sixteen bits. Elsewhere the encoder narrows back to
 eight rather than refusing — a pipeline that sets `depth` once should not break
-when its output format is switched.
+when its output format is switched. Without `depth: 16`, a 16-bit source is
+narrowed to eight bits right after decoding, which halves what every step
+after it holds.
 
 ## Errors
 
@@ -318,12 +330,40 @@ an image" from "the engine is not installed" without matching on a message.
 
 ## The engine
 
-Rust, loaded as a prebuilt `.node`. It is **not** optional and there is no
-JavaScript fallback: a missing binary raises with build instructions rather
-than degrading silently, so one deployment cannot behave differently from
-another.
+Rust, loaded as a prebuilt `.node`. It is **not** optional: a missing binary
+raises rather than degrading silently, so one deployment cannot behave
+differently from another.
 
-Build it locally with `pnpm build:napi`.
+Each platform's engine is its own npm package, which `@c9up/prism` lists
+as an optional dependency at its exact version:
+
+| Platform | Package |
+|---|---|
+| Linux x64 (glibc) | `@c9up/prism-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@c9up/prism-linux-arm64-gnu` |
+| macOS x64 | `@c9up/prism-darwin-x64` |
+| macOS arm64 | `@c9up/prism-darwin-arm64` |
+| Windows x64 | `@c9up/prism-win32-x64-msvc` |
+
+Your package manager installs only the one that matches the machine (`os`,
+`cpu` and `libc` fields), so an install downloads one binary and needs no Rust
+toolchain. An install run with optional dependencies omitted
+(`--no-optional`, `--omit=optional`) skips it.
+
+There is no JavaScript fallback. If the engine is missing, the first operation throws
+`E_PRISM_NATIVE_REQUIRED`, naming the package to install:
+
+```text
+Fix: install @c9up/prism-linux-x64-gnu at the exact version of @c9up/prism: ...
+```
+
+The load error itself is the exception's `cause`, not part of its message.
+
+In a checkout of this repository, `pnpm build:napi` builds
+`index.<platform>.node` at the package root, and prism loads that file before
+looking for the platform package. `node scripts/platform-packages.mjs` rewrites
+the platform packages' manifests (`npm/<platform>/package.json`) and the
+optional dependencies after a version bump; CI fails when they are stale.
 
 ## Testing
 

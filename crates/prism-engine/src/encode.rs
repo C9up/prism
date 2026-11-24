@@ -138,6 +138,29 @@ pub fn encode_with_effort(
     Ok(out)
 }
 
+/// What encoding `image` as `format` adds to it in memory, in bytes.
+///
+/// The converted copy each path builds (RGB for JPEG, 8-bit RGBA for WebP and
+/// AVIF, 16-bit for a deep PNG or TIFF, float for HDR and OpenEXR), and as
+/// much again for the encoder's own state and output — twice as much for the
+/// lossy WebP and AVIF encoders, which build their YUV planes beside it. An
+/// estimate, for [`crate::ops::charge`]; compressed output is smaller.
+pub fn working_bytes(image: &DynamicImage, format: ImageFormat, depth: u8) -> u64 {
+    let pixels = u64::from(image.width()) * u64::from(image.height());
+    let (converted, factor) = match format {
+        ImageFormat::Jpeg => (3, 2),
+        ImageFormat::Png if depth >= 16 => (8, 2),
+        // The image is cloned as it is.
+        ImageFormat::Png => (u64::from(image.color().bytes_per_pixel()), 2),
+        ImageFormat::WebP | ImageFormat::Avif => (4, 3),
+        ImageFormat::Farbfeld => (8, 2),
+        ImageFormat::Tiff if depth >= 16 => (8, 2),
+        ImageFormat::Hdr | ImageFormat::OpenExr => (12, 2),
+        _ => (4, 2),
+    };
+    pixels.saturating_mul(converted * factor)
+}
+
 /// Whether an output format can carry transparency.
 ///
 /// JPEG cannot, and the float formats model light rather than coverage — an

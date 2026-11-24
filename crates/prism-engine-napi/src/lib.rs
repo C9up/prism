@@ -47,6 +47,9 @@ pub struct JsLimits {
     pub max_pixels: Option<i64>,
     /// Largest input accepted, in bytes. Default 67108864.
     pub max_bytes: Option<i64>,
+    /// Largest working set one pipeline may hold, in bytes. Default
+    /// 536870912.
+    pub max_memory: Option<i64>,
     /// Formats this application will DECODE. Default jpeg, png, webp.
     ///
     /// Every decoder is compiled in; this is the runtime gate. Widening it
@@ -87,6 +90,11 @@ fn limits_of(limits: Option<JsLimits>) -> Result<Limits> {
             .filter(|value| *value > 0)
             .map(|value| value as usize)
             .unwrap_or(defaults.max_bytes),
+        max_memory: limits
+            .max_memory
+            .filter(|value| *value > 0)
+            .map(|value| value as u64)
+            .unwrap_or(defaults.max_memory),
     })
 }
 

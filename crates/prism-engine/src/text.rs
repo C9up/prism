@@ -22,6 +22,7 @@ use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
 use image::{DynamicImage, Rgba, RgbaImage};
 
 use crate::error::EngineError;
+use crate::guard::Limits;
 use crate::ops;
 
 /// Longest watermark text accepted, in characters.
@@ -50,7 +51,8 @@ pub fn render(
     text: &str,
     size: f32,
     colour: Colour,
-    max_pixels: u64,
+    limits: Limits,
+    held: u64,
 ) -> Result<DynamicImage, EngineError> {
     if text.is_empty() {
         return Err(EngineError::Geometry("the watermark text is empty".into()));
@@ -119,7 +121,9 @@ pub fn render(
     // than wrapped into a small one.
     let width = (max_x - min_x).ceil().max(1.0) as u32;
     let height = (max_y - min_y).ceil().max(1.0) as u32;
-    ops::bound(width, height, max_pixels)?;
+    ops::bound(width, height, limits.max_pixels)?;
+    // `held` is the image the layer will be drawn onto, alive meanwhile.
+    ops::charge(held, ops::bytes_for(width, height, 4), limits.max_memory)?;
 
     // Second pass: draw.
     let mut layer = RgbaImage::new(width, height);

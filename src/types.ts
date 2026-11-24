@@ -181,11 +181,25 @@ export interface Limits {
 	 * Largest decoded pixel count. Default 50000000.
 	 *
 	 * The decompression-bomb bound. A 40 KB PNG can declare 50000x50000, and
-	 * decoding it asks for ten gigabytes before anything objects.
+	 * decoding it asks for ten gigabytes before anything objects. Checked
+	 * against the header and, for a GIF or an extended WebP, against every
+	 * frame the file holds.
 	 */
 	maxPixels?: number;
 	/** Largest input accepted, in bytes. Default 67108864 (64 MiB). */
 	maxBytes?: number;
+	/**
+	 * Largest working set one pipeline may hold, in bytes. Default
+	 * 536870912 (512 MiB).
+	 *
+	 * A pixel count does not bound memory: a 16-bit RGBA pixel is 8 bytes
+	 * decoded, and a resize holds a 16-byte float intermediate of source
+	 * width x target height beside the source and the output. Each step adds
+	 * what it holds to what it is about to allocate, and is refused with
+	 * `E_PRISM_MEMORY_LIMIT` before allocating when the sum is over this.
+	 * Every image under the default `maxPixels` decodes within the default.
+	 */
+	maxMemory?: number;
 	/**
 	 * Formats this application will decode. Default `["jpeg", "png", "webp"]`.
 	 *
@@ -291,8 +305,31 @@ export interface ImageServingConfig {
 	 * turns it off.
 	 */
 	memoryCacheBytes?: number;
+	/**
+	 * With a `cacheDir`, rendered variants on disk are kept up to this many
+	 * bytes. Past it, the variants of sources that no longer exist go first,
+	 * then the oldest written, until the cache is under nine tenths of it.
+	 * Defaults to 1 GiB; 0 turns the bound off.
+	 *
+	 * A source found missing by a request loses its variants at once; this
+	 * bound catches the rest — sources deleted or renamed without anyone
+	 * asking for them again.
+	 */
+	maxCacheBytes?: number;
 	/** `max-age`, in seconds. Defaults to a year. */
 	maxAge?: number;
+	/**
+	 * Who may store an answer. Defaults to `"public"`, for images anyone may
+	 * see.
+	 *
+	 * A route behind authentication must not answer `public`: a shared cache
+	 * in front of the application (a CDN, a reverse proxy) may store such an
+	 * answer and serve it to anyone asking for the same URL, without the
+	 * application being asked again. `"private"` keeps it in the browser of
+	 * the user who asked; `false` sends no `Cache-Control` at all, for a
+	 * middleware that sets its own.
+	 */
+	cacheControl?: "public" | "private" | false;
 	/**
 	 * Renders run at once. Defaults to 2.
 	 *
@@ -316,6 +353,16 @@ export interface ImageServingConfig {
 export interface PrismConfig {
 	/** Applied to every operation that does not pass its own. */
 	limits?: Limits;
+	/**
+	 * Pipelines this instance runs at once. Defaults to 2; a value that is
+	 * not a positive integer reads as the default.
+	 *
+	 * Each pipeline may hold up to `limits.maxMemory`, so this times that is
+	 * the most the instance holds. The rest wait their turn. Keep it below
+	 * libuv's pool (`UV_THREADPOOL_SIZE`, four by default), which the
+	 * application's file, DNS and crypto calls share.
+	 */
+	concurrency?: number;
 	/** Default output quality. */
 	quality?: number;
 	/**

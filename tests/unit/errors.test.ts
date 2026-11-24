@@ -69,13 +69,14 @@ describe("fromEngine", () => {
 });
 
 describe("E_PRISM_NATIVE_REQUIRED", () => {
-	it("says why it is missing and how to get it", () => {
+	it("carries the fix in its message", () => {
 		// A missing binary is the one failure where the message IS the fix.
 		const error = new errors.E_PRISM_NATIVE_REQUIRED([
-			"no binary for linux-riscv64",
+			"install @c9up/prism-linux-x64-gnu",
 		]);
 		expect(error.code).toBe("E_PRISM_NATIVE_REQUIRED");
-		expect(error.message).toContain("no binary for linux-riscv64");
-		expect(error.message).toContain("pnpm build:napi");
+		expect(error.message).toBe(
+			"The Rust image engine is required but not loaded.\n  Fix: install @c9up/prism-linux-x64-gnu",
+		);
 	});
 });

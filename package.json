@@ -8,10 +8,10 @@
   "types": "./src/index.ts",
   "files": [
     "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
     "README.md",
     "dist",
     "stubs",
-    "index.*.node",
     "src"
   ],
   "exports": {
@@ -60,6 +60,8 @@
     "build": "tsc -p tsconfig.build.json",
     "build:napi": "cargo build --locked --release -p prism-engine-napi && pnpm build:napi-types && node scripts/copy-napi.mjs",
     "build:napi-types": "node scripts/build-napi-types.mjs",
+    "platforms:sync": "node scripts/platform-packages.mjs",
+    "platforms:check": "node scripts/platform-packages.mjs --check",
     "test": "vitest run",
     "test:rust": "cargo test --locked",
     "lint": "biome check src/ tests/",
@@ -69,6 +71,13 @@
   },
   "dependencies": {
     "@c9up/flare": "^0.1.0"
+  },
+  "optionalDependencies": {
+    "@c9up/prism-linux-x64-gnu": "0.1.8",
+    "@c9up/prism-linux-arm64-gnu": "0.1.8",
+    "@c9up/prism-darwin-x64": "0.1.8",
+    "@c9up/prism-darwin-arm64": "0.1.8",
+    "@c9up/prism-win32-x64-msvc": "0.1.8"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",

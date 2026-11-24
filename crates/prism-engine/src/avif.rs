@@ -18,10 +18,16 @@
 //!    `dav1d` checks neither against the other: its limit is the only place
 //!    a frame lying about its size is caught before the allocation. The price
 //!    is a second decode of every AVIF, which is the cheap half of AVIF.
+//!
+//! Both start from the container, and the container is bounded first: an
+//! item spread over several `iloc` extents is copied into one buffer by
+//! `mp4parse`, one copy per extent, and nothing stops the same range being
+//! listed sixty thousand times. [`extents_fit`] reads the `iloc` box before
+//! `mp4parse` does and refuses an item larger than the file carrying it.
 
 use std::io::Cursor;
 
-use mp4parse::{read_avif, ParseStrictness};
+use mp4parse::{read_avif, AvifContext, ParseStrictness};
 
 use crate::error::EngineError;
 
@@ -39,28 +45,33 @@ fn unreadable(why: impl std::fmt::Display) -> EngineError {
     EngineError::Unreadable(format!("AVIF: {why}"))
 }
 
-/// The coded AV1 data of the primary item and of the alpha item, if any.
-fn items(bytes: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>), EngineError> {
-    let context = read_avif(&mut Cursor::new(bytes), ParseStrictness::Normal)
-        .map_err(|error| unreadable(format!("{error:?}")))?;
+/// Parse the container, once its item locations are known to fit the file.
+fn container(bytes: &[u8]) -> Result<AvifContext, EngineError> {
+    extents_fit(bytes)?;
+    read_avif(&mut Cursor::new(bytes), ParseStrictness::Normal)
+        .map_err(|error| unreadable(format!("{error:?}")))
+}
+
+/// The coded AV1 data of the primary item and of the alpha item, if any —
+/// borrowed from the container rather than copied again.
+fn items(context: &AvifContext) -> Result<(&[u8], Option<&[u8]>), EngineError> {
     let primary = context
         .primary_item_coded_data()
         .filter(|data| !data.is_empty())
-        .ok_or_else(|| unreadable("no primary image item"))?
-        .to_vec();
+        .ok_or_else(|| unreadable("no primary image item"))?;
     let alpha = context
         .alpha_item_coded_data()
-        .filter(|data| !data.is_empty())
-        .map(<[u8]>::to_vec);
+        .filter(|data| !data.is_empty());
     Ok((primary, alpha))
 }
 
 /// Read the dimensions an AVIF declares, decoding nothing.
 pub fn declared(bytes: &[u8]) -> Result<Declared, EngineError> {
-    let (primary, alpha) = items(bytes)?;
-    let (width, height, mut max_pixels) = largest_frame(&primary)?;
+    let context = container(bytes)?;
+    let (primary, alpha) = items(&context)?;
+    let (width, height, mut max_pixels) = largest_frame(primary)?;
     if let Some(alpha) = alpha {
-        let (_, _, alpha_pixels) = largest_frame(&alpha)?;
+        let (_, _, alpha_pixels) = largest_frame(alpha)?;
         max_pixels = max_pixels.max(alpha_pixels);
     }
     Ok(Declared {
@@ -73,12 +84,131 @@ pub fn declared(bytes: &[u8]) -> Result<Declared, EngineError> {
 /// Decode every AV1 stream of an AVIF under a frame-size limit, and throw
 /// the pictures away. See the module documentation for why.
 pub fn preflight(bytes: &[u8], max_pixels: u64) -> Result<(), EngineError> {
-    let (primary, alpha) = items(bytes)?;
-    decode_bounded(primary, max_pixels)?;
+    let context = container(bytes)?;
+    let (primary, alpha) = items(&context)?;
+    // Owned: `dav1d` keeps the data it is sent. No larger than the file.
+    decode_bounded(primary.to_vec(), max_pixels)?;
     if let Some(alpha) = alpha {
-        decode_bounded(alpha, max_pixels)?;
+        decode_bounded(alpha.to_vec(), max_pixels)?;
     }
     Ok(())
+}
+
+/// Refuse an AVIF one of whose items is located in more bytes than the file
+/// holds.
+///
+/// An item's extents are copied end to end into one buffer before anything
+/// reads them, so their lengths add up to what that buffer costs. An item
+/// cannot be larger than the file that carries it; one whose extents say it
+/// is lists the same bytes over and over, which is a way to turn eight bytes
+/// of `iloc` into a copy of the whole `mdat`. ISO/IEC 14496-12, 8.11.3.
+fn extents_fit(bytes: &[u8]) -> Result<(), EngineError> {
+    let Some(meta) = boxes(bytes)
+        .find(|(kind, _)| kind == b"meta")
+        .map(|(_, body)| body)
+    else {
+        // No `meta`: `mp4parse` refuses the file on its own.
+        return Ok(());
+    };
+    // `meta` is a full box: version and flags first.
+    let children = meta
+        .get(4..)
+        .ok_or_else(|| unreadable("truncated meta box"))?;
+    for (_, iloc) in boxes(children).filter(|(kind, _)| kind == b"iloc") {
+        iloc_fits(iloc, bytes.len() as u64)?;
+    }
+    Ok(())
+}
+
+/// ISOBMFF boxes in `bytes`: each type and its body. Stops at a header that
+/// does not fit, as `mp4parse` treats trailing garbage.
+fn boxes(bytes: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
+    let mut rest = bytes;
+    std::iter::from_fn(move || {
+        let size = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?);
+        let kind: [u8; 4] = rest.get(4..8)?.try_into().ok()?;
+        let (header, size) = match size {
+            0 => (8, rest.len()),
+            1 => (
+                16,
+                usize::try_from(u64::from_be_bytes(rest.get(8..16)?.try_into().ok()?)).ok()?,
+            ),
+            size => (8, usize::try_from(size).ok()?),
+        };
+        if size < header || size > rest.len() {
+            return None;
+        }
+        let body = &rest[header..size];
+        rest = &rest[size..];
+        Some((kind, body))
+    })
+}
+
+fn iloc_fits(iloc: &[u8], file: u64) -> Result<(), EngineError> {
+    let mut fields = Fields { data: iloc };
+    let version = fields.uint(1)?;
+    fields.uint(3)?;
+    if version > 2 {
+        return Err(unreadable("unknown iloc version"));
+    }
+    let sizes = fields.uint(1)?;
+    let (offset_size, length_size) = (sizes >> 4, sizes & 0x0F);
+    let sizes = fields.uint(1)?;
+    let base_offset_size = sizes >> 4;
+    let index_size = if version == 0 { 0 } else { sizes & 0x0F };
+    let id_size = if version < 2 { 2 } else { 4 };
+    let items = fields.uint(id_size)?;
+    for _ in 0..items {
+        fields.uint(id_size)?;
+        if version > 0 {
+            // Reserved bits and the construction method.
+            fields.uint(2)?;
+        }
+        // Data reference index.
+        fields.uint(2)?;
+        let base = fields.uint(base_offset_size)?;
+        let extents = fields.uint(2)?;
+        let mut total = 0u64;
+        for _ in 0..extents {
+            fields.uint(index_size)?;
+            let offset = fields.uint(offset_size)?;
+            // A zero or absent length runs to the end of the data.
+            let length = match fields.uint(length_size)? {
+                0 => file.saturating_sub(base.saturating_add(offset)),
+                length => length,
+            };
+            total = total.saturating_add(length);
+        }
+        if total > file {
+            return Err(unreadable(format!(
+                "an item's {extents} extents add up to {total} bytes, more than the {file}-byte file"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Big-endian fields of a box body, consumed front to back.
+struct Fields<'a> {
+    data: &'a [u8],
+}
+
+impl Fields<'_> {
+    /// An unsigned field of `size` bytes, 0 to 8.
+    fn uint(&mut self, size: u64) -> Result<u64, EngineError> {
+        let size = usize::try_from(size)
+            .ok()
+            .filter(|size| *size <= 8)
+            .ok_or_else(|| unreadable("iloc field wider than 8 bytes"))?;
+        let field = self
+            .data
+            .get(..size)
+            .ok_or_else(|| unreadable("truncated iloc box"))?;
+        self.data = &self.data[size..];
+        Ok(field
+            .iter()
+            .fold(0, |value, byte| value << 8 | u64::from(*byte)))
+    }
 }
 
 /// `ERANGE`, which `dav1d` answers when a frame is over `frame_size_limit`.
@@ -293,6 +423,75 @@ mod tests {
             .expect("encodes")
     }
 
+    fn primary_of(bytes: &[u8]) -> Vec<u8> {
+        let context = container(bytes).expect("parses");
+        items(&context).expect("has items").0.to_vec()
+    }
+
+    /// Rewrite the encoder's single-extent `iloc` (version 0, 4-byte offset
+    /// and length, one item) so its item lists the same range `extents` times.
+    fn repeat_extents(avif: &[u8], extents: u16) -> Vec<u8> {
+        let at = |name: &[u8]| {
+            avif.windows(4)
+                .position(|window| window == name)
+                .expect("box present")
+                - 4
+        };
+        let (meta, iloc) = (at(b"meta"), at(b"iloc"));
+        let size = u32::from_be_bytes(avif[iloc..iloc + 4].try_into().expect("4 bytes")) as usize;
+        assert_eq!(size, 30, "one item, one extent");
+        let extent = &avif[iloc + size - 8..iloc + size];
+        let grown = 8 * (usize::from(extents) - 1);
+        let mut box_ = avif[iloc..iloc + 20].to_vec();
+        box_[..4].copy_from_slice(&((size + grown) as u32).to_be_bytes());
+        box_.extend_from_slice(&extents.to_be_bytes());
+        let offset = u32::from_be_bytes(extent[..4].try_into().expect("4 bytes")) as usize + grown;
+        for _ in 0..extents {
+            box_.extend_from_slice(&(offset as u32).to_be_bytes());
+            box_.extend_from_slice(&extent[4..]);
+        }
+        let mut out = avif[..iloc].to_vec();
+        out.extend_from_slice(&box_);
+        out.extend_from_slice(&avif[iloc + size..]);
+        let meta_size = u32::from_be_bytes(out[meta..meta + 4].try_into().expect("4 bytes"));
+        out[meta..meta + 4].copy_from_slice(&(meta_size + grown as u32).to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn an_item_listed_in_more_bytes_than_the_file_is_refused_before_parsing() {
+        // Opaque, so the encoder writes one item and no alpha.
+        let opaque = RgbaImage::from_fn(64, 64, |x, y| Rgba([x as u8, y as u8, 64, 255]));
+        let seed =
+            crate::encode::encode(&DynamicImage::ImageRgba8(opaque), ImageFormat::Avif, 80, 8)
+                .expect("encodes");
+        // Rewritten with a single extent, the file still reads.
+        assert_eq!(
+            declared(&repeat_extents(&seed, 1)).expect("reads").width,
+            64
+        );
+        let bomb = repeat_extents(&seed, 600);
+        let error = declared(&bomb).expect_err("refuses");
+        assert_eq!(error.code(), "UNREADABLE");
+        assert!(error.to_string().contains("600 extents"), "{error}");
+        assert_eq!(
+            preflight(&bomb, 1 << 20).expect_err("refuses").code(),
+            "UNREADABLE"
+        );
+    }
+
+    #[test]
+    fn a_truncated_iloc_is_unreadable() {
+        let mut fields = Fields { data: &[1, 2] };
+        assert_eq!(fields.uint(2).expect("reads"), 0x0102);
+        assert_eq!(fields.uint(1).expect_err("refuses").code(), "UNREADABLE");
+        assert_eq!(fields.uint(9).expect_err("refuses").code(), "UNREADABLE");
+        assert_eq!(
+            iloc_fits(&[3, 0, 0, 0], 10).expect_err("refuses").code(),
+            "UNREADABLE"
+        );
+    }
+
     #[test]
     fn reads_the_declared_size_of_an_encoded_avif() {
         let declared = declared(&avif(48, 32)).expect("reads");
@@ -305,7 +504,7 @@ mod tests {
         // The size check on the sequence header is the first line; this is
         // the second, for a frame header that overrides it. Exercised here
         // directly, since no encoder at hand writes a lying frame header.
-        let (primary, _) = items(&avif(48, 32)).expect("parses");
+        let primary = primary_of(&avif(48, 32));
         decode_bounded(primary.clone(), 48 * 32).expect("at the limit decodes");
         let error = decode_bounded(primary, 48 * 32 - 1).expect_err("refuses");
         assert_eq!(error.code(), "DECODE_FAILED");
@@ -316,7 +515,7 @@ mod tests {
     fn a_stream_with_no_frame_is_refused_rather_than_waited_on() {
         // Only the sequence header: `image`'s read loop would ask for a
         // picture forever.
-        let (primary, _) = items(&avif(16, 16)).expect("parses");
+        let primary = primary_of(&avif(16, 16));
         let mut rest = primary.as_slice();
         let mut header = None;
         while !rest.is_empty() {
@@ -333,7 +532,7 @@ mod tests {
 
     #[test]
     fn a_truncated_stream_is_unreadable_not_a_panic() {
-        let (primary, _) = items(&avif(16, 16)).expect("parses");
+        let primary = primary_of(&avif(16, 16));
         for cut in 0..primary.len().min(64) {
             let _ = largest_frame(&primary[..cut]);
         }
